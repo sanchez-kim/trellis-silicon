@@ -1,6 +1,8 @@
-# TRELLIS.2 for Apple Silicon
+# TRELLIS-Silicon
 
 Run [TRELLIS.2](https://github.com/microsoft/TRELLIS) image-to-3D generation natively on Mac.
+
+This project builds on [trellis-mac](https://github.com/shivampkumar/trellis-mac) by Shivam P Kumar — the original CUDA-only-to-Apple-Silicon port of Microsoft's [TRELLIS.2](https://github.com/microsoft/TRELLIS.2) — and continues development independently.
 
 This is a port of Microsoft's TRELLIS.2 — a state-of-the-art image-to-3D model — from CUDA-only to Apple Silicon via PyTorch MPS. No NVIDIA GPU required.
 
@@ -32,8 +34,8 @@ Output is a GLB with base-color, metallic, and roughness textures — ready for 
 
 ```bash
 # Clone this repo
-git clone https://github.com/shivampkumar/trellis-mac.git
-cd trellis-mac
+git clone https://github.com/sanchez-kim/trellis-silicon.git
+cd trellis-silicon
 
 # (Recommended) Download the Xcode Metal Toolchain so setup can build the
 # Metal-accelerated texture baker. Without this, setup falls back to a pure
@@ -93,7 +95,22 @@ python generate.py --help
 | `--output` | `output_3d` | Output filename (without extension) |
 | `--pipeline-type` | `512` | Pipeline resolution: `512`, `1024`, `1024_cascade` |
 | `--texture-size` | `1024` | PBR texture resolution: `512`, `1024`, `2048` |
-| `--no-texture` | — | Skip texture baking, export geometry only |
+| `--no-texture` | — | Skip texture baking (still exports geometry) |
+| `--obj` | — | Also export untextured, full-resolution OBJ geometry (written before simplification). Default output is GLB only. |
+| `--resident` | — | Keep all models resident on MPS instead of shuffling between CPU and MPS per phase. Measured slower on a 32GB machine (memory pressure outweighs the saved transfers); may help on 64GB+ machines |
+| `--steps N` | pipeline JSON (usually 12) | Override sampler steps for all three flow phases |
+
+GLB with baked PBR textures is the only default output; use `--obj` if you also need the untextured full-resolution mesh.
+
+## Demo UI
+
+A Gradio web demo is available:
+
+```bash
+python app.py
+```
+
+This opens a local web page where you can upload an image, adjust seed/pipeline-type/texture options, and view the generated GLB in an interactive 3D viewer.
 
 ## What Was Ported
 
@@ -125,7 +142,7 @@ Benchmarks on M4 Pro (24GB), pipeline type `512`, full Metal stack installed, we
 
 | Stage | Time |
 |-------|------|
-| Pipeline load (first call per process) | 103s |
+| Pipeline load (first call per process) | ~55-65s (was 103s before conditional checkpoint loading) |
 | Sparse structure sampling (12 steps) | 80s |
 | Shape SLat sampling (12 steps) | 22s |
 | Texture SLat sampling (12 steps) | 12s |
@@ -136,6 +153,10 @@ Benchmarks on M4 Pro (24GB), pipeline type `512`, full Metal stack installed, we
 | Texture bake (Metal, 1024²) | ~15s |
 | **Total wall-clock (cold start)** | **5m 13s** |
 | Generation + bake only (excluding pipeline load) | 3m 20s |
+
+*Pipeline load numbers were measured on a different machine (M-series, 32GB) than the rest of the table above (M4 Pro, 24GB), so totals will vary — the load-time row is included to document the optimization, not to be summed with the other rows.*
+
+`from_pretrained` now conditionally loads checkpoints based on the selected `pipeline_type` instead of unconditionally loading every flow model. For the default `512` pipeline this skips the two ~2.4GB `*_1024` flow models (~4.8GB not deserialized), which dropped measured pipeline load from ~103s to ~55-65s on an M-series machine with cached weights.
 
 The shape and texture decoder VAEs got 2.5–2.9× faster after [Pedro Naugusto fixed four bugs in `mtlgemm`](https://github.com/shivampkumar/trellis-mac/issues/1#issuecomment-thread) (zero-copy MPS, real fp16/bf16 kernels, real masked implicit GEMM, no per-call `waitUntilCompleted`). Before his fix, the decoder path was ~38s; now it's ~27s. Sampling steps that also touch sparse conv saw smaller wins — those paths are dominated by attention, which is still SDPA-padded on MPS.
 
@@ -148,8 +169,8 @@ With `SKIP_METAL=1` (pure-Python KDTree baker) the texture bake takes ~15s inste
 ## Limitations
 
 - **Hole filling disabled**: Decode-time hole filling requires `cumesh`. The Metal port segfaults on decoder-sized meshes, so we skip this step. Output meshes may have small holes.
-- **Sparse attention is not fused**: The SDPA-padded wrapper works but is the single largest remaining bottleneck (~80 s of a 5m 13s run, the sparse structure sampling phase). A fused Metal attention kernel would be a meaningful perf win.
-- **Pre-simplified before texture bake**: The mesh is decimated from ~800K to ~200K faces before Metal BVH construction to avoid builder instability. If you need the full-resolution mesh, export it via the OBJ output (which is written before simplification).
+- **Attention is not fused**: Attention runs through PyTorch's SDPA rather than a fused Metal kernel. Profiling (see `tools/profile_attn.py`) shows dense attention is ~63% of the sparse structure sampling phase (the single most expensive phase), so a flash-style Metal kernel for the *dense* path could still help — but a fused *varlen/sparse* kernel would not: single-image inference runs batch-size 1 with zero padding waste, so the padding overhead the varlen approach eliminates doesn't exist here (measured ~2-3% end-to-end at best).
+- **Pre-simplified before texture bake**: The mesh is decimated from ~800K to ~200K faces before Metal BVH construction to avoid builder instability. If you need the full-resolution mesh, pass `--obj` to export it (written before simplification).
 - **No training support**: Inference only.
 
 ### On `mtlgemm` / `flex_gemm` and thermal throttling
@@ -157,6 +178,10 @@ With `SKIP_METAL=1` (pure-Python KDTree baker) the texture bake takes ~15s inste
 `setup.sh` installs `mtlgemm` as part of the Metal stack. It's used both for the sparse conv diffusion path (since Pedro Naugusto's zero-copy fix) and for the texture baker's `grid_sample_3d`. Without it, `generate.py` falls back to `conv_none.py` for diffusion and monkey-patches `o_voxel.postprocess._grid_sample_3d` with a `torch.nn.functional.grid_sample` call for the bake. The fallback path works but is slower and leaves mild ring artifacts on curved surfaces.
 
 One thing that burned me during testing: after the M4 Pro had been doing heavy compute for a few hours, the same pipeline slowed from ~3.5 min generation to ~36 min purely from thermal throttling — nothing in the code path changed. If you see unusually slow runs, let the machine cool for a few minutes and retry before blaming the code.
+
+## Development
+
+`tools/profile_attn.py` is an instrumented profiling harness for measuring MPS bottlenecks — attention share of total time, ops falling back to CPU, and per-phase breakdowns. Useful as a starting point for future performance work on the sampling and attention paths.
 
 ## License
 
@@ -169,6 +194,7 @@ Upstream model weights are subject to their own licenses:
 
 ## Credits
 
+- [trellis-mac](https://github.com/shivampkumar/trellis-mac) by Shivam P Kumar — the direct upstream this project builds on; the original CUDA-to-Apple-Silicon (MPS) port of TRELLIS.2
 - [TRELLIS.2](https://github.com/microsoft/TRELLIS.2) by Microsoft Research — the original model and codebase
 - [DINOv3](https://github.com/facebookresearch/dinov3) by Meta — image feature extraction
 - [RMBG-2.0](https://github.com/Bria-AI/RMBG-2.0) by BRIA AI — background removal
