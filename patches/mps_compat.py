@@ -566,6 +566,54 @@ class ClassifierFreeGuidanceSamplerMixin:
     write_file(path, new_src)
 
 
+def patch_skip_init_on_load():
+    """Skip initialize_weights() when loading a model from a checkpoint.
+
+    models.from_pretrained constructs the module (which runs the model's
+    initialize_weights() — xavier/normal init over every parameter) and then
+    immediately calls load_state_dict, overwriting all of it. For the 1.3B flow
+    models that wasted init costs 40-70s each of pure RNG generation. Skipping
+    it is verified bit-identical to the initialized-then-loaded model (the
+    checkpoint covers every parameter), so no math changes.
+
+    This runs synchronously before the pipeline is used (all construction stays
+    ahead of run()'s torch.manual_seed), so the sampling RNG stream — and thus
+    the output mesh — is unchanged. Set SKIP_INIT_ON_LOAD=0 to restore the
+    original init-then-load behavior.
+    """
+    path = os.path.join(TRELLIS_ROOT, "trellis2/models/__init__.py")
+    src = read_file(path)
+
+    if "SKIP_INIT_ON_LOAD" in src:
+        print(f"  Already patched: {os.path.relpath(path, TRELLIS_ROOT)}")
+        return
+
+    src = src.replace(
+        "    with open(config_file, 'r') as f:\n"
+        "        config = json.load(f)\n"
+        "    model = __getattr__(config['name'])(**config['args'], **kwargs)\n"
+        "    model.load_state_dict(load_file(model_file), strict=False)\n",
+
+        "    with open(config_file, 'r') as f:\n"
+        "        config = json.load(f)\n"
+        "    _klass = __getattr__(config['name'])\n"
+        "    # load_state_dict below overwrites every parameter, so the model's\n"
+        "    # initialize_weights() (tens of seconds of xavier/normal RNG for the\n"
+        "    # 1.3B flow models) is pure waste. Skip it — verified bit-identical.\n"
+        "    _skip = os.environ.get('SKIP_INIT_ON_LOAD', '1') != '0' and hasattr(_klass, 'initialize_weights')\n"
+        "    if _skip:\n"
+        "        _orig_init = _klass.initialize_weights\n"
+        "        _klass.initialize_weights = lambda self: None\n"
+        "    try:\n"
+        "        model = _klass(**config['args'], **kwargs)\n"
+        "    finally:\n"
+        "        if _skip:\n"
+        "            _klass.initialize_weights = _orig_init\n"
+        "    model.load_state_dict(load_file(model_file), strict=False)\n",
+    )
+    write_file(path, src)
+
+
 def install_conv_backend():
     """Copy the pure-PyTorch sparse convolution backend into place."""
     src = os.path.join(BACKENDS_DIR, "conv_none.py")
@@ -646,6 +694,7 @@ def main():
     patch_base_models_to_load()
     patch_pipeline_conditional_load()
     patch_cfg_batching()
+    patch_skip_init_on_load()
     install_conv_backend()
     install_mesh_extract()
 
