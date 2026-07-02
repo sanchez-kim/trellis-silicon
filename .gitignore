@@ -11,3 +11,7 @@ stubs/
 progress-assets/
 PROGRESS.md
 deps/
+
+# Session-tool state
+.omc/
+.serena/
