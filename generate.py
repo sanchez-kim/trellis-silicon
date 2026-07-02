@@ -60,8 +60,19 @@ def main():
         help="Skip texture baking, export geometry only",
     )
     parser.add_argument(
+        "--obj", action="store_true",
+        help="Also export untextured OBJ geometry (default: GLB only)",
+    )
+    parser.add_argument(
         "--steps", type=int, default=None,
         help="Override sampler steps for all three flow phases (default: pipeline JSON, usually 12)",
+    )
+    parser.add_argument(
+        "--resident", action="store_true",
+        help="Keep all needed models resident on MPS for the whole run instead of "
+             "shuffling each submodel CPU<->MPS around its phase. Measured slower "
+             "than the default on a 32GB machine (resident weights add unified-memory "
+             "pressure that outweighs the saved transfers); may pay off on 64GB+.",
     )
     args = parser.parse_args()
 
@@ -78,12 +89,23 @@ def main():
     t0 = time.time()
     from trellis2.pipelines.trellis2_image_to_3d import Trellis2ImageTo3DPipeline
 
-    pipeline = Trellis2ImageTo3DPipeline.from_pretrained("microsoft/TRELLIS.2-4B")
+    # Task A: only load the checkpoints this pipeline_type actually needs.
+    # For pipeline_type="512" this skips the two ~2.4GB *_1024 flow models.
+    pipeline = Trellis2ImageTo3DPipeline.from_pretrained(
+        "microsoft/TRELLIS.2-4B", pipeline_type=args.pipeline_type,
+    )
+    # Keep upstream's low_vram shuffling as the default — measured faster here
+    # than keeping weights resident (the CPU->MPS copies happen either way;
+    # resident mode only saves the cheap return trips while adding ~9-11GB of
+    # unified-memory pressure across the sampling loop). --resident opts into
+    # the all-on-MPS path for high-memory machines.
+    pipeline.low_vram = not args.resident
     print(f"Loaded in {time.time() - t0:.0f}s")
 
-    # Move to MPS
+    # Move to MPS. Under low_vram this is a no-op; with --resident it makes
+    # every submodel resident now.
     pipeline.to(torch.device("mps"))
-    print("Device: MPS")
+    print(f"Device: MPS (low_vram={pipeline.low_vram})")
 
     # Load image
     img = PILImage.open(args.image)
@@ -288,13 +310,14 @@ def main():
         print(f"Saved: {glb_path}")
 
     # Also save OBJ
-    obj_path = f"{args.output}.obj"
-    with open(obj_path, "w") as f:
-        for v in verts:
-            f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
-        for face in faces:
-            f.write(f"f {face[0]+1} {face[1]+1} {face[2]+1}\n")
-    print(f"Saved: {obj_path}")
+    if args.obj:
+        obj_path = f"{args.output}.obj"
+        with open(obj_path, "w") as f:
+            for v in verts:
+                f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
+            for face in faces:
+                f.write(f"f {face[0]+1} {face[1]+1} {face[2]+1}\n")
+        print(f"Saved: {obj_path}")
 
     print(f"\nTotal time: {t_gen:.1f}s generation + baking")
 
