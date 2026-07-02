@@ -1,43 +1,21 @@
 """
 Generate a 3D mesh from a single image using TRELLIS.2 on Apple Silicon.
+
+Thin CLI wrapper over pipeline_core, which owns the shared load + generate +
+bake logic (also used by the Gradio UI in app.py). Importing pipeline_core
+performs the backend/env setup that MUST run before torch is imported — so it
+is imported at module top here, before argparse/torch, exactly as the inline
+setup block used to sit at the top of this file.
 """
 
 import sys
 import os
 
-# Set up backends before any TRELLIS imports. Use setdefault so the caller
-# can override from the environment. Default conv backend is flex_gemm since
-# Pedro Naugusto's mtlgemm fix (zero-copy on MPS, fp16/bf16 native); fall
-# back to conv_none if flex_gemm isn't importable for some reason.
-# MPS fallback MUST be set before torch is imported anywhere (including
-# transitively via flex_gemm). Without this, segment_reduce and a few other
-# ops crash instead of falling back to CPU.
-os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
-
-os.environ.setdefault("ATTN_BACKEND", "sdpa")
-os.environ.setdefault("SPARSE_ATTN_BACKEND", "sdpa")
-try:
-    import flex_gemm  # noqa: F401
-    os.environ.setdefault("SPARSE_CONV_BACKEND", "flex_gemm")
-except (ImportError, RuntimeError):
-    # ImportError: package not installed (SKIP_METAL=1 or install failed).
-    # RuntimeError: metallib load failure — flex_gemm ships an MSL 4.0
-    # metallib which only loads on macOS 26+. On older macOS the import
-    # itself raises "Failed to load metallib ... language version 4.0
-    # which is not supported on this OS". Fall back to conv_none either way.
-    os.environ.setdefault("SPARSE_CONV_BACKEND", "none")
-
-# Add paths. stubs/ is appended (not prepended) so a pip-installed o_voxel
-# wins over our package stub — the flat override module o_voxel_override_convert
-# is still discoverable either way because it doesn't collide with any package.
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "TRELLIS.2"))
-sys.path.append(os.path.join(os.path.dirname(__file__), "stubs"))
+import pipeline_core
+from pipeline_core import load_pipeline, generate_glb, WatchdogEmptyMeshError
 
 import argparse
 import time
-import torch
-import numpy as np
-from PIL import Image as PILImage
 
 
 def main():
@@ -87,230 +65,36 @@ def main():
     # Load pipeline
     print("\nLoading pipeline...")
     t0 = time.time()
-    from trellis2.pipelines.trellis2_image_to_3d import Trellis2ImageTo3DPipeline
-
-    # Task A: only load the checkpoints this pipeline_type actually needs.
-    # For pipeline_type="512" this skips the two ~2.4GB *_1024 flow models.
-    pipeline = Trellis2ImageTo3DPipeline.from_pretrained(
-        "microsoft/TRELLIS.2-4B", pipeline_type=args.pipeline_type,
-    )
-    # Keep upstream's low_vram shuffling as the default — measured faster here
-    # than keeping weights resident (the CPU->MPS copies happen either way;
-    # resident mode only saves the cheap return trips while adding ~9-11GB of
-    # unified-memory pressure across the sampling loop). --resident opts into
-    # the all-on-MPS path for high-memory machines.
-    pipeline.low_vram = not args.resident
+    pipeline = load_pipeline(args.pipeline_type, resident=args.resident)
     print(f"Loaded in {time.time() - t0:.0f}s")
-
-    # Move to MPS. Under low_vram this is a no-op; with --resident it makes
-    # every submodel resident now.
-    pipeline.to(torch.device("mps"))
     print(f"Device: MPS (low_vram={pipeline.low_vram})")
 
     # Load image
-    img = PILImage.open(args.image)
+    img = pipeline_core.PILImage.open(args.image)
     print(f"Input: {args.image} ({img.size[0]}x{img.size[1]})")
 
     # Generate
     print(f"\nGenerating 3D model (pipeline={args.pipeline_type}, seed={args.seed})...")
-    t0 = time.time()
-
-    sampler_overrides = {"steps": args.steps} if args.steps else {}
-
-    def _watchdog_help_message():
-        return (
-            "\nERROR: The decoder produced an empty mesh.\n"
-            "On Apple Silicon this is almost always the macOS GPU watchdog\n"
-            "killing a long-running Metal kernel in the SLat decoder. The Metal\n"
-            "error prints to stderr above (look for\n"
-            "'kIOGPUCommandBufferCallbackErrorImpactingInteractivity') but does\n"
-            "not raise a Python exception, so execution continues with empty\n"
-            "tensors and crashes downstream.\n"
-            "\n"
-            "Workarounds, cheapest first:\n"
-            "  1. Run headless — close the lid / unplug external displays and\n"
-            "     re-run over SSH. The watchdog tightens with WindowServer load.\n"
-            "  2. MTL_CAPTURE_ENABLED=1 python generate.py ...   (extends the\n"
-            "     watchdog timeout as a side effect of Metal-debugger mode)\n"
-            "  3. SPARSE_CONV_BACKEND=none python generate.py ... (slower path,\n"
-            "     may not help if a single dispatch is the offender)\n"
-            "\n"
-            "Tracking issue: https://github.com/shivampkumar/trellis-mac/issues\n"
-        )
-
     try:
-        outputs = pipeline.run(
-            img,
+        result = generate_glb(
+            pipeline, img,
             seed=args.seed,
             pipeline_type=args.pipeline_type,
-            sparse_structure_sampler_params=sampler_overrides,
-            shape_slat_sampler_params=sampler_overrides,
-            tex_slat_sampler_params=sampler_overrides,
+            texture_size=args.texture_size,
+            no_texture=args.no_texture,
+            output_base=args.output,
+            steps=args.steps,
         )
-    except (IndexError, AssertionError) as e:
-        msg = str(e)
-        # Two known watchdog-corruption signatures:
-        #   IndexError: max(): Expected reduction dim 0 to have non-zero size
-        #     — empty SparseTensor in decode_latent's spatial_shape calc
-        #   AssertionError: BVH needs at least 8 triangles, got 0
-        #     — empty mesh propagating into o_voxel.postprocess.to_glb
-        watchdog_signatures = (
-            "non-zero size",
-            "BVH needs at least 8 triangles",
-        )
-        if any(sig in msg for sig in watchdog_signatures):
-            print(_watchdog_help_message())
-            sys.exit(2)
-        raise
-
-    t_gen = time.time() - t0
-
-    mesh_out = outputs[0] if isinstance(outputs, list) else outputs
-
-    verts = mesh_out.vertices.cpu().numpy()
-    faces = mesh_out.faces.cpu().numpy()
-    if verts.shape[0] == 0 or faces.shape[0] == 0:
-        print(_watchdog_help_message())
+    except WatchdogEmptyMeshError as e:
+        # Empty mesh from the GPU watchdog: print the help text and exit 2,
+        # exactly as before the refactor (str(e) is the full help message).
+        print(str(e))
         sys.exit(2)
-    print(f"\nMesh: {verts.shape[0]:,} vertices, {faces.shape[0]:,} triangles")
-    print(f"Generation time: {t_gen:.1f}s")
 
-    # Check for voxel texture data
-    has_voxels = hasattr(mesh_out, "attrs") and mesh_out.attrs is not None
-    tex_size = args.texture_size
-
-    if has_voxels and not args.no_texture:
-        # Try Metal-accelerated bake via o_voxel + mtldiffrast if available.
-        # Catch AttributeError too: our stubs/o_voxel/ stub has no .postprocess
-        # submodule, so a shadowing stub package trips getattr, not import.
-        try:
-            import o_voxel.postprocess
-            backend = getattr(o_voxel.postprocess, '_BACKEND', None)
-            has_dr = getattr(o_voxel.postprocess, '_HAS_DR', False)
-            use_metal = backend == 'metal' and has_dr
-            if use_metal and not getattr(o_voxel.postprocess, '_HAS_FLEX_GEMM', False):
-                # o_voxel's _grid_sample_3d fallback returns [B*C, M] but the
-                # bake consumes it as [M, C]. Patch it to transpose before the
-                # reshape. We avoid installing flex_gemm itself because its
-                # import slows the diffusion hot path ~10x on MPS.
-                import torch.nn.functional as _F_gs
-                def _gs3d_fix(feats, coords, shape, grid, mode='trilinear'):
-                    B, C = shape[0], shape[1]
-                    D, H, W = shape[2], shape[3], shape[4]
-                    device = feats.device
-                    dense_vol = torch.zeros(B, C, D, H, W, dtype=feats.dtype, device=device)
-                    batch_idx = coords[:, 0].long()
-                    cx = coords[:, 1].long(); cy = coords[:, 2].long(); cz = coords[:, 3].long()
-                    dense_vol[batch_idx, :, cx, cy, cz] = feats
-                    grid_norm = torch.stack([
-                        grid[..., 2] / (W - 1) * 2 - 1,
-                        grid[..., 1] / (H - 1) * 2 - 1,
-                        grid[..., 0] / (D - 1) * 2 - 1,
-                    ], dim=-1).reshape(B, 1, 1, -1, 3)
-                    sampled = _F_gs.grid_sample(
-                        dense_vol, grid_norm, mode='bilinear',
-                        align_corners=True, padding_mode='border',
-                    )
-                    M = grid.shape[1]
-                    return sampled.reshape(B, C, M).permute(0, 2, 1).reshape(B * M, C)
-                o_voxel.postprocess._grid_sample_3d = _gs3d_fix
-        except (ImportError, AttributeError):
-            use_metal = False
-
-        glb_path = f"{args.output}.glb"
-        t_bake = time.time()
-
-        if use_metal:
-            try:
-                print(f"\nBaking PBR textures via Metal ({tex_size}x{tex_size})...")
-                import o_voxel
-
-                # Pre-simplify mesh to avoid mtlbvh crash on large meshes.
-                # Target ~200K faces — keeps detail, avoids Metal BVH issues.
-                import fast_simplification
-                verts_np = mesh_out.vertices.cpu().numpy()
-                faces_np = mesh_out.faces.cpu().numpy()
-                target_faces = min(200000, len(faces_np))
-                if len(faces_np) > target_faces:
-                    ratio = 1.0 - (target_faces / len(faces_np))
-                    print(f"  Simplifying mesh: {len(faces_np):,} -> ~{target_faces:,} faces")
-                    simp_verts, simp_faces = fast_simplification.simplify(verts_np, faces_np, ratio)
-                    simp_verts_t = torch.from_numpy(simp_verts).float().to(mesh_out.vertices.device)
-                    simp_faces_t = torch.from_numpy(simp_faces.astype('int32')).to(mesh_out.faces.device)
-                else:
-                    simp_verts_t = mesh_out.vertices
-                    simp_faces_t = mesh_out.faces
-
-                # Move all mesh tensors to CPU — o_voxel.to_glb mixes device-neutral
-                # AABB tensor with mesh tensors; keep everything on CPU to avoid mismatch.
-                glb = o_voxel.postprocess.to_glb(
-                    vertices=simp_verts_t.cpu(),
-                    faces=simp_faces_t.cpu(),
-                    attr_volume=mesh_out.attrs.cpu(),
-                    coords=mesh_out.coords.cpu(),
-                    attr_layout=mesh_out.layout,
-                    voxel_size=mesh_out.voxel_size,
-                    aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
-                    decimation_target=target_faces,
-                    texture_size=tex_size,
-                    verbose=True,
-                )
-                glb.export(glb_path)
-                print(f"  Saved: {glb_path}")
-            except RuntimeError as e:
-                print(f"\n  Metal bake failed: {e}")
-                print(f"  Falling back to KDTree texture baker...")
-                use_metal = False
-
-        if not use_metal:
-            print(f"\nBaking PBR textures via KDTree ({tex_size}x{tex_size})...")
-            from backends.texture_baker import uv_unwrap, bake_texture, export_glb_with_texture
-
-            voxel_coords = mesh_out.coords.cpu().float()
-            voxel_attrs = mesh_out.attrs.cpu().float()
-            origin = mesh_out.origin.cpu().float()
-            vs = mesh_out.voxel_size
-
-            # Simplify before UV unwrap — xatlas is very slow on 800K+ vertex meshes
-            bake_verts, bake_faces = verts, faces
-            target_faces = min(200000, len(faces))
-            if len(faces) > target_faces:
-                try:
-                    import fast_simplification
-                    ratio = 1.0 - (target_faces / len(faces))
-                    print(f"  Simplifying mesh: {len(faces):,} -> ~{target_faces:,} faces")
-                    bake_verts, bake_faces = fast_simplification.simplify(verts, faces, ratio)
-                except ImportError:
-                    print(f"  Warning: fast_simplification not installed, UV unwrapping full mesh (slow)")
-
-            print("  UV unwrapping with xatlas...")
-            new_verts, new_faces, uvs, vmapping = uv_unwrap(bake_verts, bake_faces)
-            print(f"  UV unwrap: {len(verts):,} -> {len(new_verts):,} vertices")
-
-            base_color_img, mr_img, mask = bake_texture(
-                new_verts, new_faces, uvs,
-                voxel_coords.numpy(), voxel_attrs.numpy(),
-                origin.numpy(), vs,
-                texture_size=tex_size,
-            )
-
-            PILImage.fromarray(base_color_img).save(f"{args.output}_basecolor.png")
-            export_glb_with_texture(new_verts, new_faces, uvs, base_color_img, mr_img, glb_path)
-            print(f"  Saved: {glb_path}")
-
-        t_bake_total = time.time() - t_bake
-        print(f"  Bake time: {t_bake_total:.0f}s")
-    else:
-        # Fallback: vertex colors only
-        print("\nExporting with vertex colors (use --texture-size for PBR textures)...")
-        import trimesh
-        tm = trimesh.Trimesh(vertices=verts, faces=faces)
-        glb_path = f"{args.output}.glb"
-        tm.export(glb_path)
-        print(f"Saved: {glb_path}")
-
-    # Also save OBJ
+    # Also save OBJ (CLI-only; the UI never needs untextured OBJ)
     if args.obj:
+        verts = result["verts"]
+        faces = result["faces"]
         obj_path = f"{args.output}.obj"
         with open(obj_path, "w") as f:
             for v in verts:
@@ -319,7 +103,7 @@ def main():
                 f.write(f"f {face[0]+1} {face[1]+1} {face[2]+1}\n")
         print(f"Saved: {obj_path}")
 
-    print(f"\nTotal time: {t_gen:.1f}s generation + baking")
+    print(f"\nTotal time: {result['gen_time']:.1f}s generation + baking")
 
 
 if __name__ == "__main__":

@@ -72,7 +72,7 @@ source .venv/bin/activate
 
 # Install dependencies
 echo "Installing dependencies..."
-DEPS="torch torchvision torchaudio transformers accelerate huggingface_hub safetensors pillow numpy trimesh scipy tqdm easydict kornia timm imageio opencv-python-headless xatlas fast-simplification"
+DEPS="torch torchvision torchaudio transformers accelerate huggingface_hub safetensors pillow numpy trimesh scipy tqdm easydict kornia timm imageio opencv-python-headless xatlas fast-simplification gradio"
 if command -v uv &>/dev/null; then
     PIP="uv pip install"
 else
