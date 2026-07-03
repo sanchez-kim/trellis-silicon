@@ -33,7 +33,7 @@ def run_both(sampler, model, x_t, t, cond, neg_cond, **kw):
 def main():
     print("Loading pipeline (512)...")
     pipe = pipeline_core.load_pipeline("512")
-    img = pipe.preprocess_image(Image.open("assets/shoe_input.png"))
+    img = pipe.preprocess_image(Image.open("assets/brighella_input.png"))
     torch.manual_seed(42)
 
     t = 0.875  # inside the guided interval [0.6, 1.0]

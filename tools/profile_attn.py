@@ -413,7 +413,7 @@ def print_phase(name):
 
 
 def main():
-    img_path = os.path.join(os.path.dirname(__file__), "assets", "shoe_input.png")
+    img_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "brighella_input.png")
 
     install_warning_sweep()
 

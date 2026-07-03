@@ -2,7 +2,7 @@
 
 Run [TRELLIS.2](https://github.com/microsoft/TRELLIS.2) image-to-3D generation natively on Apple Silicon — no NVIDIA GPU required.
 
-TRELLIS.2 is Microsoft Research's state-of-the-art image-to-3D model. It ships CUDA-only. This project runs it on Apple Silicon through PyTorch's MPS backend: a single image in, a textured 400K-vertex GLB out, entirely on your Mac's GPU.
+TRELLIS.2 is Microsoft Research's state-of-the-art image-to-3D model. It ships CUDA-only. This project runs it on Apple Silicon through PyTorch's MPS backend: a single image in, a textured 400K+-vertex GLB out, entirely on your Mac's GPU.
 
 It builds on [trellis-mac](https://github.com/shivampkumar/trellis-mac) by Shivam P Kumar — the original CUDA-to-Apple-Silicon port — and continues independently, packaged as an installable Python project with an additional performance pass (see [Performance](#performance)).
 
@@ -18,14 +18,16 @@ On a warm Apple Silicon machine (pipeline type `512`, weights cached, full Metal
 
 ### Example
 
-**Input image** &rarr; **Generated 3D mesh** (~400K vertices, ~800K triangles) with Metal-baked PBR textures:
+**Input image** &rarr; **Generated 3D mesh** (~500K vertices, ~1M triangles) with Metal-baked PBR textures:
 
 <p>
-<img src="assets/shoe_input.png" width="180">
-<img src="assets/shoe_front.png" width="220">
-<img src="assets/shoe_3q.png" width="260">
-<img src="assets/shoe_side.png" width="220">
+<img src="assets/brighella_input.png" width="180">
+<img src="assets/brighella_front.png" width="220">
+<img src="assets/brighella_3q.png" width="260">
+<img src="assets/brighella_side.png" width="220">
 </p>
+
+*Sample image: ["Brighella on a pedestal"](https://www.metmuseum.org/art/collection/search/201769) (1710-13), The Metropolitan Museum of Art — public domain (CC0).*
 
 ## Requirements
 
@@ -180,7 +182,7 @@ Memory peaks around 18GB of unified memory during generation. The first-ever run
 
 - **Hole filling disabled.** Decode-time hole filling needs `cumesh`, whose Metal port segfaults on decoder-sized meshes, so it is skipped. Output meshes may have small holes.
 - **Attention is not fused.** Attention runs through PyTorch SDPA rather than a fused Metal kernel. Profiling (`tools/profile_attn.py`) shows dense attention is ~63% of the structure sampling phase, so a flash-style Metal kernel for the *dense* path could still help — but a fused *varlen/sparse* kernel would not: single-image inference is batch-1 with zero padding waste.
-- **Pre-simplified before bake.** The mesh is decimated from ~800K to ~200K faces before Metal BVH construction to avoid builder instability. Pass `--obj` for the full-resolution mesh (written before simplification).
+- **Pre-simplified before bake.** The mesh is decimated from ~1M to ~200K faces before Metal BVH construction to avoid builder instability. Pass `--obj` for the full-resolution mesh (written before simplification).
 - **Inference only.** No training support.
 
 ## Development
