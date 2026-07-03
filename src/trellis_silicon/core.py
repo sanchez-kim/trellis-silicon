@@ -11,6 +11,8 @@ when this code lived at its top. Keep the os.environ/sys.path block first.
 import sys
 import os
 
+from . import _paths
+
 # Set up backends before any TRELLIS imports. Use setdefault so the caller
 # can override from the environment. Default conv backend is flex_gemm since
 # Pedro Naugusto's mtlgemm fix (zero-copy on MPS, fp16/bf16 native); fall
@@ -24,6 +26,7 @@ os.environ.setdefault("ATTN_BACKEND", "sdpa")
 os.environ.setdefault("SPARSE_ATTN_BACKEND", "sdpa")
 try:
     import flex_gemm  # noqa: F401
+
     os.environ.setdefault("SPARSE_CONV_BACKEND", "flex_gemm")
 except (ImportError, RuntimeError):
     # ImportError: package not installed (SKIP_METAL=1 or install failed).
@@ -36,10 +39,11 @@ except (ImportError, RuntimeError):
 # Add paths. stubs/ is appended (not prepended) so a pip-installed o_voxel
 # wins over our package stub — the flat override module o_voxel_override_convert
 # is still discoverable either way because it doesn't collide with any package.
-# __file__ lives at the project root (same directory generate.py used), so the
-# paths resolve identically to the old in-generate.py setup.
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "TRELLIS.2"))
-sys.path.append(os.path.join(os.path.dirname(__file__), "stubs"))
+# TRELLIS.2/ and stubs/ live at the project root; _paths resolves them from the
+# installed package location (walk up to the dir containing TRELLIS.2/, or the
+# TRELLIS2_ROOT override).
+sys.path.insert(0, _paths.trellis2_root())
+sys.path.append(_paths.stubs_dir())
 
 import time
 import torch
@@ -80,9 +84,9 @@ def watchdog_help_message():
         "Workarounds, cheapest first:\n"
         "  1. Run headless — close the lid / unplug external displays and\n"
         "     re-run over SSH. The watchdog tightens with WindowServer load.\n"
-        "  2. MTL_CAPTURE_ENABLED=1 python generate.py ...   (extends the\n"
+        "  2. MTL_CAPTURE_ENABLED=1 trellis-silicon ...   (extends the\n"
         "     watchdog timeout as a side effect of Metal-debugger mode)\n"
-        "  3. SPARSE_CONV_BACKEND=none python generate.py ... (slower path,\n"
+        "  3. SPARSE_CONV_BACKEND=none trellis-silicon ... (slower path,\n"
         "     may not help if a single dispatch is the offender)\n"
         "\n"
         "Tracking issue: https://github.com/shivampkumar/trellis-mac/issues\n"
@@ -100,7 +104,8 @@ def load_pipeline(pipeline_type, resident=False):
 
     # Task A: only load the checkpoints this pipeline_type actually needs.
     pipeline = Trellis2ImageTo3DPipeline.from_pretrained(
-        "microsoft/TRELLIS.2-4B", pipeline_type=pipeline_type,
+        "microsoft/TRELLIS.2-4B",
+        pipeline_type=pipeline_type,
     )
     # Keep upstream's low_vram shuffling as the default — measured faster here
     # than keeping weights resident (the CPU->MPS copies happen either way;
@@ -115,8 +120,9 @@ def load_pipeline(pipeline_type, resident=False):
     return pipeline
 
 
-def generate_glb(pipeline, image, *, seed, pipeline_type, texture_size,
-                 no_texture=False, output_base, steps=None):
+def generate_glb(
+    pipeline, image, *, seed, pipeline_type, texture_size, no_texture=False, output_base, steps=None
+):
     """Run the pipeline and bake a textured GLB. Shared by CLI and UI.
 
     Returns a dict with the output paths and stats:
@@ -178,34 +184,45 @@ def generate_glb(pipeline, image, *, seed, pipeline_type, texture_size,
         # submodule, so a shadowing stub package trips getattr, not import.
         try:
             import o_voxel.postprocess
-            backend = getattr(o_voxel.postprocess, '_BACKEND', None)
-            has_dr = getattr(o_voxel.postprocess, '_HAS_DR', False)
-            use_metal = backend == 'metal' and has_dr
-            if use_metal and not getattr(o_voxel.postprocess, '_HAS_FLEX_GEMM', False):
+
+            backend = getattr(o_voxel.postprocess, "_BACKEND", None)
+            has_dr = getattr(o_voxel.postprocess, "_HAS_DR", False)
+            use_metal = backend == "metal" and has_dr
+            if use_metal and not getattr(o_voxel.postprocess, "_HAS_FLEX_GEMM", False):
                 # o_voxel's _grid_sample_3d fallback returns [B*C, M] but the
                 # bake consumes it as [M, C]. Patch it to transpose before the
                 # reshape. We avoid installing flex_gemm itself because its
                 # import slows the diffusion hot path ~10x on MPS.
                 import torch.nn.functional as _F_gs
-                def _gs3d_fix(feats, coords, shape, grid, mode='trilinear'):
+
+                def _gs3d_fix(feats, coords, shape, grid, mode="trilinear"):
                     B, C = shape[0], shape[1]
                     D, H, W = shape[2], shape[3], shape[4]
                     device = feats.device
                     dense_vol = torch.zeros(B, C, D, H, W, dtype=feats.dtype, device=device)
                     batch_idx = coords[:, 0].long()
-                    cx = coords[:, 1].long(); cy = coords[:, 2].long(); cz = coords[:, 3].long()
+                    cx = coords[:, 1].long()
+                    cy = coords[:, 2].long()
+                    cz = coords[:, 3].long()
                     dense_vol[batch_idx, :, cx, cy, cz] = feats
-                    grid_norm = torch.stack([
-                        grid[..., 2] / (W - 1) * 2 - 1,
-                        grid[..., 1] / (H - 1) * 2 - 1,
-                        grid[..., 0] / (D - 1) * 2 - 1,
-                    ], dim=-1).reshape(B, 1, 1, -1, 3)
+                    grid_norm = torch.stack(
+                        [
+                            grid[..., 2] / (W - 1) * 2 - 1,
+                            grid[..., 1] / (H - 1) * 2 - 1,
+                            grid[..., 0] / (D - 1) * 2 - 1,
+                        ],
+                        dim=-1,
+                    ).reshape(B, 1, 1, -1, 3)
                     sampled = _F_gs.grid_sample(
-                        dense_vol, grid_norm, mode='bilinear',
-                        align_corners=True, padding_mode='border',
+                        dense_vol,
+                        grid_norm,
+                        mode="bilinear",
+                        align_corners=True,
+                        padding_mode="border",
                     )
                     M = grid.shape[1]
                     return sampled.reshape(B, C, M).permute(0, 2, 1).reshape(B * M, C)
+
                 o_voxel.postprocess._grid_sample_3d = _gs3d_fix
         except (ImportError, AttributeError):
             use_metal = False
@@ -221,6 +238,7 @@ def generate_glb(pipeline, image, *, seed, pipeline_type, texture_size,
                 # Pre-simplify mesh to avoid mtlbvh crash on large meshes.
                 # Target ~200K faces — keeps detail, avoids Metal BVH issues.
                 import fast_simplification
+
                 verts_np = mesh_out.vertices.cpu().numpy()
                 faces_np = mesh_out.faces.cpu().numpy()
                 target_faces = min(200000, len(faces_np))
@@ -229,7 +247,9 @@ def generate_glb(pipeline, image, *, seed, pipeline_type, texture_size,
                     print(f"  Simplifying mesh: {len(faces_np):,} -> ~{target_faces:,} faces")
                     simp_verts, simp_faces = fast_simplification.simplify(verts_np, faces_np, ratio)
                     simp_verts_t = torch.from_numpy(simp_verts).float().to(mesh_out.vertices.device)
-                    simp_faces_t = torch.from_numpy(simp_faces.astype('int32')).to(mesh_out.faces.device)
+                    simp_faces_t = torch.from_numpy(simp_faces.astype("int32")).to(
+                        mesh_out.faces.device
+                    )
                 else:
                     simp_verts_t = mesh_out.vertices
                     simp_faces_t = mesh_out.faces
@@ -253,12 +273,12 @@ def generate_glb(pipeline, image, *, seed, pipeline_type, texture_size,
                 result["backend"] = "metal"
             except RuntimeError as e:
                 print(f"\n  Metal bake failed: {e}")
-                print(f"  Falling back to KDTree texture baker...")
+                print("  Falling back to KDTree texture baker...")
                 use_metal = False
 
         if not use_metal:
             print(f"\nBaking PBR textures via KDTree ({tex_size}x{tex_size})...")
-            from backends.texture_baker import uv_unwrap, bake_texture, export_glb_with_texture
+            from .backends.texture_baker import uv_unwrap, bake_texture, export_glb_with_texture
 
             voxel_coords = mesh_out.coords.cpu().float()
             voxel_attrs = mesh_out.attrs.cpu().float()
@@ -271,20 +291,27 @@ def generate_glb(pipeline, image, *, seed, pipeline_type, texture_size,
             if len(faces) > target_faces:
                 try:
                     import fast_simplification
+
                     ratio = 1.0 - (target_faces / len(faces))
                     print(f"  Simplifying mesh: {len(faces):,} -> ~{target_faces:,} faces")
                     bake_verts, bake_faces = fast_simplification.simplify(verts, faces, ratio)
                 except ImportError:
-                    print(f"  Warning: fast_simplification not installed, UV unwrapping full mesh (slow)")
+                    print(
+                        "  Warning: fast_simplification not installed, UV unwrapping full mesh (slow)"
+                    )
 
             print("  UV unwrapping with xatlas...")
             new_verts, new_faces, uvs, vmapping = uv_unwrap(bake_verts, bake_faces)
             print(f"  UV unwrap: {len(verts):,} -> {len(new_verts):,} vertices")
 
             base_color_img, mr_img, mask = bake_texture(
-                new_verts, new_faces, uvs,
-                voxel_coords.numpy(), voxel_attrs.numpy(),
-                origin.numpy(), vs,
+                new_verts,
+                new_faces,
+                uvs,
+                voxel_coords.numpy(),
+                voxel_attrs.numpy(),
+                origin.numpy(),
+                vs,
                 texture_size=tex_size,
             )
 
@@ -303,6 +330,7 @@ def generate_glb(pipeline, image, *, seed, pipeline_type, texture_size,
         # Fallback: vertex colors only
         print("\nExporting with vertex colors (use texture baking for PBR textures)...")
         import trimesh
+
         glb_path = f"{output_base}.glb"
         tm = trimesh.Trimesh(vertices=verts, faces=faces)
         tm.export(glb_path)

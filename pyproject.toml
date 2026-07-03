@@ -1,10 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
-name = "trellis-apple"
+name = "trellis-silicon"
 version = "0.1.0"
-description = "TRELLIS.2 image-to-3D generation for Apple Silicon"
+description = "TRELLIS.2 image-to-3D generation, native on Apple Silicon (PyTorch MPS)"
+readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
+authors = [{ name = "Sanchez Kim" }]
 
+# Authoritative runtime dependency list (kept in sync with setup.sh DEPS). The
+# optional Metal acceleration packages (mtlbvh/mtldiffrast/mtlmesh/mtlgemm/
+# o_voxel) are built from git by setup.sh, not declared here.
 dependencies = [
     "torch>=2.1",
     "torchvision",
@@ -18,7 +27,49 @@ dependencies = [
     "trimesh",
     "scipy",
     "tqdm",
+    "easydict",
+    "kornia",
+    "timm",
+    "imageio",
+    "opencv-python-headless",
+    "xatlas",
+    "fast-simplification",
+    "gradio",
 ]
 
+[project.optional-dependencies]
+dev = ["ruff"]
+
 [project.scripts]
-trellis-generate = "generate:main"
+trellis-silicon = "trellis_silicon.cli:main"
+trellis-silicon-web = "trellis_silicon.webui:main"
+trellis-silicon-patch = "trellis_silicon.patches:main"
+
+[project.urls]
+Homepage = "https://github.com/sanchez-kim/trellis-silicon"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/trellis_silicon"]
+
+[tool.ruff]
+line-length = 100
+src = ["src"]
+# These two backends are copied verbatim (shutil.copy2) into the patched
+# TRELLIS.2 tree by the patcher, so their contents must stay byte-identical to
+# what the original patcher installed — don't let the formatter touch them.
+extend-exclude = [
+    "src/trellis_silicon/backends/conv_none.py",
+    "src/trellis_silicon/backends/mesh_extract.py",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+# Long lines are unavoidable in the verbatim patch strings and WHY comments.
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# core.py / webui.py import order is load-bearing: core's env + sys.path setup
+# MUST run before torch (and before gradio, which pulls torch transitively), so
+# these imports are intentionally not top-of-module and not isort-sortable.
+"src/trellis_silicon/core.py" = ["E402", "I001"]
+"src/trellis_silicon/webui.py" = ["I001"]

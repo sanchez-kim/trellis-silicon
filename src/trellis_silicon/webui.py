@@ -1,12 +1,12 @@
 """
 Gradio demo UI for TRELLIS.2 image-to-3D on Apple Silicon.
 
-Run:  python app.py   → opens on http://127.0.0.1:7860 (share=False).
+Run:  trellis-silicon-web   → opens on http://127.0.0.1:7860 (share=False).
 
-Shares one code path with the CLI via pipeline_core. The pipeline is loaded
-lazily on the first Generate click (so the UI opens instantly) and cached in a
-module global keyed by pipeline_type; switching pipeline_type replaces the
-cached pipeline rather than holding two ~9GB model sets resident at once.
+Shares one code path with the CLI via :mod:`trellis_silicon.core`. The pipeline
+is loaded lazily on the first Generate click (so the UI opens instantly) and
+cached in a module global keyed by pipeline_type; switching pipeline_type
+replaces the cached pipeline rather than holding two ~9GB model sets resident.
 """
 
 import os
@@ -14,12 +14,12 @@ import time
 import uuid
 import gc
 
-# pipeline_core MUST be imported before torch is imported anywhere — importing
-# it performs the backend/env setup (PYTORCH_ENABLE_MPS_FALLBACK, ATTN/CONV
+# core MUST be imported before torch is imported anywhere — importing it
+# performs the backend/env setup (PYTORCH_ENABLE_MPS_FALLBACK, ATTN/CONV
 # backends, sys.path). Keep it above gradio too, since gradio pulls in numpy/
 # torch transitively in some setups. Do not reorder these.
-import pipeline_core
-from pipeline_core import load_pipeline, generate_glb, WatchdogEmptyMeshError
+from . import core
+from .core import load_pipeline, generate_glb, WatchdogEmptyMeshError
 
 import gradio as gr
 
@@ -39,10 +39,10 @@ def _free_pipeline():
     _PIPELINE = None
     _PIPELINE_TYPE = None
     gc.collect()
-    # torch is already imported via pipeline_core; empty the MPS allocator cache
+    # torch is already imported via core; empty the MPS allocator cache
     # so the freed ~9GB isn't held by the caching allocator before the reload.
     try:
-        pipeline_core.torch.mps.empty_cache()
+        core.torch.mps.empty_cache()
     except Exception:
         pass
 
@@ -90,7 +90,8 @@ def generate(image, seed, pipeline_type, texture_size):
 
     try:
         result = generate_glb(
-            _PIPELINE, image,
+            _PIPELINE,
+            image,
             seed=seed,
             pipeline_type=pipeline_type,
             texture_size=texture_size,
@@ -119,19 +120,23 @@ def build_demo():
                 image_in = gr.Image(type="pil", label="Input image")
                 seed_in = gr.Number(value=42, precision=0, label="Seed")
                 pipeline_in = gr.Radio(
-                    choices=["512", "1024", "1024_cascade"], value="512",
+                    choices=["512", "1024", "1024_cascade"],
+                    value="512",
                     label="Pipeline type",
                 )
                 texture_in = gr.Radio(
-                    choices=["512", "1024", "2048"], value="1024",
+                    choices=["512", "1024", "2048"],
+                    value="1024",
                     label="Texture size",
                 )
                 generate_btn = gr.Button("Generate", variant="primary")
             with gr.Column(scale=1):
                 model_out = gr.Model3D(label="Output GLB", clear_color=[0.1, 0.1, 0.1, 1.0])
                 status_out = gr.Textbox(
-                    label="Status", value="Ready. Upload an image and click Generate.",
-                    lines=8, interactive=False,
+                    label="Status",
+                    value="Ready. Upload an image and click Generate.",
+                    lines=8,
+                    interactive=False,
                 )
 
         generate_btn.click(
@@ -146,6 +151,10 @@ def build_demo():
     return demo
 
 
-if __name__ == "__main__":
+def main():
     demo = build_demo()
     demo.launch(server_name="127.0.0.1", server_port=7860, share=False)
+
+
+if __name__ == "__main__":
+    main()

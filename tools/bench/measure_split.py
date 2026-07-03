@@ -1,7 +1,7 @@
 """Split each model load into construct (RNG) vs weight-I/O (no RNG)."""
 import os, sys, time, json
 sys.path.insert(0, os.getcwd())
-import pipeline_core
+from trellis_silicon import core as pipeline_core
 import torch
 from safetensors.torch import load_file
 from trellis2 import models as tmodels

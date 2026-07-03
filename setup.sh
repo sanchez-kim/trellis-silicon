@@ -43,7 +43,7 @@ clone_dep https://github.com/pedronaugusto/mtlmesh.git       mtlmesh
 clone_dep https://github.com/pedronaugusto/mtlgemm.git       mtlgemm
 clone_dep https://github.com/pedronaugusto/trellis2-apple.git trellis2-apple
 
-# TRELLIS.2 lives at the project root (patches and generate.py expect it there)
+# TRELLIS.2 lives at the project root (the patcher and package expect it there)
 if [ ! -d "TRELLIS.2" ]; then
     echo "Cloning TRELLIS.2 ..."
     git clone --depth 1 https://github.com/microsoft/TRELLIS.2.git TRELLIS.2
@@ -72,13 +72,14 @@ source .venv/bin/activate
 
 # Install dependencies
 echo "Installing dependencies..."
-DEPS="torch torchvision torchaudio transformers accelerate huggingface_hub safetensors pillow numpy trimesh scipy tqdm easydict kornia timm imageio opencv-python-headless xatlas fast-simplification gradio"
 if command -v uv &>/dev/null; then
     PIP="uv pip install"
 else
     PIP="pip install"
 fi
-$PIP $DEPS
+# Editable install: pulls the runtime deps from pyproject.toml and registers the
+# trellis-silicon / trellis-silicon-web / trellis-silicon-patch console scripts.
+$PIP -e .
 $PIP "$DEPS_DIR/utils3d"
 
 # Optional Metal acceleration for texture baking.
@@ -114,7 +115,7 @@ fi
 
 # Apply source patches (this also installs stubs and backends)
 echo "Applying MPS compatibility patches..."
-python3 patches/mps_compat.py
+python3 -m trellis_silicon.patches
 
 # Check HuggingFace auth
 echo
@@ -133,4 +134,5 @@ fi
 echo
 echo "=== Setup complete ==="
 echo "Activate the environment:  source .venv/bin/activate"
-echo "Generate a 3D model:       python generate.py path/to/image.png"
+echo "Generate a 3D model:       trellis-silicon path/to/image.png"
+echo "Launch the web UI:         trellis-silicon-web"

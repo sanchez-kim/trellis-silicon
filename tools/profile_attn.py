@@ -18,17 +18,9 @@ import time
 import warnings
 from collections import Counter
 
-os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
-os.environ.setdefault("ATTN_BACKEND", "sdpa")
-os.environ.setdefault("SPARSE_ATTN_BACKEND", "sdpa")
-try:
-    import flex_gemm  # noqa: F401
-    os.environ.setdefault("SPARSE_CONV_BACKEND", "flex_gemm")
-except (ImportError, RuntimeError):
-    os.environ.setdefault("SPARSE_CONV_BACKEND", "none")
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "TRELLIS.2"))
-sys.path.append(os.path.join(os.path.dirname(__file__), "stubs"))
+# Importing core performs the backend/env setup (MPS fallback, ATTN/CONV
+# backends) and puts TRELLIS.2/ + stubs/ on sys.path. It MUST run before torch.
+from trellis_silicon import core  # noqa: F401
 
 import torch
 from PIL import Image as PILImage

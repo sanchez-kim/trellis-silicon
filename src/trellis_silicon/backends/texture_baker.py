@@ -10,8 +10,9 @@ Replaces nvdiffrast (CUDA-only) with:
 Produces GLB files with PBR textures (base color, metallic, roughness).
 """
 
-import numpy as np
 import time
+
+import numpy as np
 
 
 def uv_unwrap(vertices, faces):
@@ -112,8 +113,18 @@ def _rasterize_uv_triangles(vertices, faces, uvs, texture_size):
     return positions, mask
 
 
-def bake_texture(vertices, faces, uvs, voxel_coords, voxel_attrs, origin, voxel_size,
-                 texture_size=2048, k_neighbors=8, **kwargs):
+def bake_texture(
+    vertices,
+    faces,
+    uvs,
+    voxel_coords,
+    voxel_attrs,
+    origin,
+    voxel_size,
+    texture_size=2048,
+    k_neighbors=8,
+    **kwargs,
+):
     """
     Bake voxel attributes into a UV-mapped texture.
 
@@ -132,9 +143,9 @@ def bake_texture(vertices, faces, uvs, voxel_coords, voxel_attrs, origin, voxel_
     H = W = texture_size
     t0 = time.time()
 
-    coords_np = voxel_coords.numpy() if hasattr(voxel_coords, 'numpy') else voxel_coords
-    attrs_np = voxel_attrs.numpy() if hasattr(voxel_attrs, 'numpy') else voxel_attrs
-    origin_np = origin.numpy() if hasattr(origin, 'numpy') else np.array(origin)
+    coords_np = voxel_coords.numpy() if hasattr(voxel_coords, "numpy") else voxel_coords
+    attrs_np = voxel_attrs.numpy() if hasattr(voxel_attrs, "numpy") else voxel_attrs
+    origin_np = origin.numpy() if hasattr(origin, "numpy") else np.array(origin)
 
     C = attrs_np.shape[1]
     n_voxels = len(coords_np)
@@ -144,7 +155,7 @@ def bake_texture(vertices, faces, uvs, voxel_coords, voxel_attrs, origin, voxel_
     voxel_world = coords_np.astype(np.float32) * voxel_size + origin_np + voxel_size * 0.5
 
     # Build KDTree on voxel positions
-    print(f"  Building KDTree...")
+    print("  Building KDTree...")
     t_tree = time.time()
     tree = cKDTree(voxel_world)
     print(f"    Tree built in {time.time() - t_tree:.1f}s")
@@ -206,6 +217,7 @@ def bake_texture(vertices, faces, uvs, voxel_coords, voxel_attrs, origin, voxel_
 
     # Fill holes via iterative dilation
     from scipy.ndimage import binary_dilation, uniform_filter
+
     current_mask = valid_mask.copy()
     for _ in range(8):
         dilated = binary_dilation(current_mask, iterations=1)
@@ -234,7 +246,9 @@ def bake_texture(vertices, faces, uvs, voxel_coords, voxel_attrs, origin, voxel_
     return base_color_img, mr_img, current_mask
 
 
-def export_glb_with_texture(vertices, faces, uvs, base_color_img, mr_img=None, output_path="output.glb"):
+def export_glb_with_texture(
+    vertices, faces, uvs, base_color_img, mr_img=None, output_path="output.glb"
+):
     """Export mesh with UV-mapped PBR textures as GLB."""
     import trimesh
     from PIL import Image

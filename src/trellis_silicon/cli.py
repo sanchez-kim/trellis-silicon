@@ -1,56 +1,66 @@
 """
 Generate a 3D mesh from a single image using TRELLIS.2 on Apple Silicon.
 
-Thin CLI wrapper over pipeline_core, which owns the shared load + generate +
-bake logic (also used by the Gradio UI in app.py). Importing pipeline_core
-performs the backend/env setup that MUST run before torch is imported — so it
-is imported at module top here, before argparse/torch, exactly as the inline
-setup block used to sit at the top of this file.
+Thin CLI wrapper over :mod:`trellis_silicon.core`, which owns the shared load +
+generate + bake logic (also used by the Gradio UI in :mod:`trellis_silicon.webui`).
+Importing ``core`` performs the backend/env setup that MUST run before torch is
+imported — so it is imported at module top here, before argparse/torch.
 """
 
-import sys
-import os
-
-import pipeline_core
-from pipeline_core import load_pipeline, generate_glb, WatchdogEmptyMeshError
-
 import argparse
+import os
+import sys
 import time
+
+from . import core
+from .core import WatchdogEmptyMeshError, generate_glb, load_pipeline
 
 
 def main():
     parser = argparse.ArgumentParser(description="Generate 3D mesh from an image using TRELLIS.2")
     parser.add_argument("image", help="Path to input image")
     parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
-    parser.add_argument("--output", default="output_3d", help="Output filename without extension (default: output_3d)")
     parser.add_argument(
-        "--pipeline-type", default="512",
+        "--output",
+        default="output_3d",
+        help="Output filename without extension (default: output_3d)",
+    )
+    parser.add_argument(
+        "--pipeline-type",
+        default="512",
         choices=["512", "1024", "1024_cascade"],
         help="Pipeline resolution (default: 512)",
     )
     parser.add_argument(
-        "--texture-size", type=int, default=1024,
+        "--texture-size",
+        type=int,
+        default=1024,
         choices=[512, 1024, 2048],
         help="Texture resolution for PBR baking (default: 1024)",
     )
     parser.add_argument(
-        "--no-texture", action="store_true",
+        "--no-texture",
+        action="store_true",
         help="Skip texture baking, export geometry only",
     )
     parser.add_argument(
-        "--obj", action="store_true",
+        "--obj",
+        action="store_true",
         help="Also export untextured OBJ geometry (default: GLB only)",
     )
     parser.add_argument(
-        "--steps", type=int, default=None,
+        "--steps",
+        type=int,
+        default=None,
         help="Override sampler steps for all three flow phases (default: pipeline JSON, usually 12)",
     )
     parser.add_argument(
-        "--resident", action="store_true",
+        "--resident",
+        action="store_true",
         help="Keep all needed models resident on MPS for the whole run instead of "
-             "shuffling each submodel CPU<->MPS around its phase. Measured slower "
-             "than the default on a 32GB machine (resident weights add unified-memory "
-             "pressure that outweighs the saved transfers); may pay off on 64GB+.",
+        "shuffling each submodel CPU<->MPS around its phase. Measured slower "
+        "than the default on a 32GB machine (resident weights add unified-memory "
+        "pressure that outweighs the saved transfers); may pay off on 64GB+.",
     )
     args = parser.parse_args()
 
@@ -70,14 +80,15 @@ def main():
     print(f"Device: MPS (low_vram={pipeline.low_vram})")
 
     # Load image
-    img = pipeline_core.PILImage.open(args.image)
+    img = core.PILImage.open(args.image)
     print(f"Input: {args.image} ({img.size[0]}x{img.size[1]})")
 
     # Generate
     print(f"\nGenerating 3D model (pipeline={args.pipeline_type}, seed={args.seed})...")
     try:
         result = generate_glb(
-            pipeline, img,
+            pipeline,
+            img,
             seed=args.seed,
             pipeline_type=args.pipeline_type,
             texture_size=args.texture_size,
@@ -100,7 +111,7 @@ def main():
             for v in verts:
                 f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
             for face in faces:
-                f.write(f"f {face[0]+1} {face[1]+1} {face[2]+1}\n")
+                f.write(f"f {face[0] + 1} {face[1] + 1} {face[2] + 1}\n")
         print(f"Saved: {obj_path}")
 
     print(f"\nTotal time: {result['gen_time']:.1f}s generation + baking")

@@ -3,7 +3,7 @@ state_dict to a skip-init-loaded model's. If identical, the checkpoint covers
 all params/buffers and init is pure waste (overwritten by load_state_dict)."""
 import os, sys, time, json
 sys.path.insert(0, os.getcwd())
-import pipeline_core
+from trellis_silicon import core as pipeline_core
 import torch
 from safetensors.torch import load_file
 from trellis2 import models as tmodels
