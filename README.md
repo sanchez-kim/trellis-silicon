@@ -21,10 +21,10 @@ On a warm Apple Silicon machine (pipeline type `512`, weights cached, full Metal
 **Input image** &rarr; **Generated 3D mesh** (~500K vertices, ~1M triangles) with Metal-baked PBR textures:
 
 <p>
-<img src="assets/brighella_input.png" width="180">
-<img src="assets/brighella_front.png" width="220">
-<img src="assets/brighella_3q.png" width="260">
-<img src="assets/brighella_side.png" width="220">
+<img src="assets/brighella_input.png" width="200">
+<img src="assets/brighella_front.png" width="200">
+<img src="assets/brighella_3q.png" width="200">
+<img src="assets/brighella_side.png" width="200">
 </p>
 
 *Sample image: ["Brighella on a pedestal"](https://www.metmuseum.org/art/collection/search/201769) (1710-13), The Metropolitan Museum of Art — public domain (CC0).*
