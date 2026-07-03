@@ -142,12 +142,19 @@ trellis-silicon photo.png --pipeline-type 1024_cascade --texture-size 2048
 <img src="assets/quality_compare.png" width="720" alt="512 default output next to 1024_cascade with 2K textures">
 </p>
 
-The gain at GLB level is mostly texture fidelity and surface cleanliness rather than raw density (see the decimation note below). The high-res pipelines also expose more of the small holes that hole-filling would normally close.
+At default settings the GLB-level gain is mostly texture fidelity, because every mesh is decimated to 200K faces before baking. That cap is configurable:
 
-Two things cap output quality relative to the CUDA original regardless of settings:
+```bash
+# let up to 800K faces survive into the GLB (measured stable, bake +~50-90s)
+BAKE_MAX_FACES=800000 trellis-silicon photo.png --pipeline-type 1024_cascade --texture-size 2048
+```
 
-- **Pre-bake decimation.** Every mesh is simplified to ~200K faces before texture baking (the Metal BVH builder is unstable on larger inputs), so the extra geometry from the 1024 pipelines improves silhouettes and reduces surface artifacts rather than surviving verbatim into the GLB. Pass `--obj` to also export the full-resolution mesh.
+Measured on one M-series/32GB machine (512-pipeline input, 1.06M raw faces): stable at every cap tried — 400K (bake 22s), 600K (30s), 800K (91s), even the full undecimated 1.06M mesh (120s), vs 9s at the default 200K. For `1024_cascade` the difference is dramatic: with `BAKE_MAX_FACES=800000`, 730K faces survive into the GLB instead of 164K — visibly cleaner drapery and far fewer surface pits. The default stays a conservative 200K until higher caps are validated on more machines (the historical "unstable above 800K" behavior of the Metal BVH builder did not reproduce here, but the evidence is one machine, single runs).
+
+Beyond that, two things still cap quality relative to the CUDA original:
+
 - **Hole filling disabled.** Decode-time hole filling needs `cumesh`, whose Metal port crashes on decoder-sized meshes; outputs may have small holes the CUDA path would close.
+- **Pre-bake decimation at default settings** — see above; `--obj` exports the full-resolution mesh regardless.
 
 ### Web UI
 
@@ -217,7 +224,7 @@ Memory peaks around 18GB of unified memory during generation. The first-ever run
 
 - **Hole filling disabled.** Decode-time hole filling needs `cumesh`, whose Metal port segfaults on decoder-sized meshes, so it is skipped. Output meshes may have small holes.
 - **Attention is not fused.** Attention runs through PyTorch SDPA rather than a fused Metal kernel. Profiling (`tools/profile_attn.py`) shows dense attention is ~63% of the structure sampling phase, so a flash-style Metal kernel for the *dense* path could still help — but a fused *varlen/sparse* kernel would not: single-image inference is batch-1 with zero padding waste.
-- **Pre-simplified before bake.** The mesh is decimated from ~1M to ~200K faces before Metal BVH construction to avoid builder instability. Pass `--obj` for the full-resolution mesh (written before simplification).
+- **Pre-simplified before bake.** By default the mesh is decimated to ~200K faces before Metal BVH construction. Raise the cap with `BAKE_MAX_FACES` (see [Maximum quality](#maximum-quality)) or pass `--obj` for the full-resolution mesh (written before simplification).
 - **Inference only.** No training support.
 
 ## Development

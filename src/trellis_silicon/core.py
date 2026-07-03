@@ -230,6 +230,10 @@ def generate_glb(
         glb_path = f"{output_base}.glb"
         t_bake = time.time()
 
+        # Decimation cap before Metal BVH / xatlas. Default 200K keeps the Metal
+        # builder stable; raise via BAKE_MAX_FACES to let more geometry survive.
+        bake_max_faces = int(os.environ.get("BAKE_MAX_FACES", "200000"))
+
         if use_metal:
             try:
                 print(f"\nBaking PBR textures via Metal ({tex_size}x{tex_size})...")
@@ -241,7 +245,7 @@ def generate_glb(
 
                 verts_np = mesh_out.vertices.cpu().numpy()
                 faces_np = mesh_out.faces.cpu().numpy()
-                target_faces = min(200000, len(faces_np))
+                target_faces = min(bake_max_faces, len(faces_np))
                 if len(faces_np) > target_faces:
                     ratio = 1.0 - (target_faces / len(faces_np))
                     print(f"  Simplifying mesh: {len(faces_np):,} -> ~{target_faces:,} faces")
@@ -287,7 +291,7 @@ def generate_glb(
 
             # Simplify before UV unwrap — xatlas is very slow on 800K+ vertex meshes
             bake_verts, bake_faces = verts, faces
-            target_faces = min(200000, len(faces))
+            target_faces = min(bake_max_faces, len(faces))
             if len(faces) > target_faces:
                 try:
                     import fast_simplification
