@@ -149,7 +149,13 @@ At default settings the GLB-level gain is mostly texture fidelity, because every
 BAKE_MAX_FACES=800000 trellis-silicon photo.png --pipeline-type 1024_cascade --texture-size 2048
 ```
 
-Measured on one M-series/32GB machine (512-pipeline input, 1.06M raw faces): stable at every cap tried — 400K (bake 22s), 600K (30s), 800K (91s), even the full undecimated 1.06M mesh (120s), vs 9s at the default 200K. For `1024_cascade` the difference is dramatic: with `BAKE_MAX_FACES=800000`, 730K faces survive into the GLB instead of 164K — visibly cleaner drapery and far fewer surface pits. The default stays a conservative 200K until higher caps are validated on more machines (the historical "unstable above 800K" behavior of the Metal BVH builder did not reproduce here, but the evidence is one machine, single runs).
+Measured on one M-series/32GB machine (512-pipeline input, 1.06M raw faces): stable at every cap tried — 400K (bake 22s), 600K (30s), 800K (91s), even the full undecimated 1.06M mesh (120s), vs 9s at the default 200K. For `1024_cascade` the difference is dramatic: with `BAKE_MAX_FACES=800000`, 730K faces survive into the GLB instead of 164K — visibly cleaner drapery and far fewer surface pits:
+
+<p>
+<img src="assets/bakecap_compare.png" width="720" alt="1024_cascade baked at the default 200K face cap next to the same generation baked at an 800K cap">
+</p>
+
+The default stays a conservative 200K until higher caps are validated on more machines (the historical "unstable above 800K" behavior of the Metal BVH builder did not reproduce here, but the evidence is one machine, single runs).
 
 Beyond that, two things still cap quality relative to the CUDA original:
 
