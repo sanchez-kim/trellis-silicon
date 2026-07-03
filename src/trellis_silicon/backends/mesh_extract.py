@@ -83,13 +83,6 @@ def flexible_dual_grid_to_mesh(
 
     N = dual_vertices.shape[0]
 
-    # Build coordinate lookup on CPU
-    coords_cpu = coords.cpu()
-    coord_to_idx = {}
-    for i in range(N):
-        key = (coords_cpu[i, 0].item(), coords_cpu[i, 1].item(), coords_cpu[i, 2].item())
-        coord_to_idx[key] = i
-
     # Find connected voxels for each intersected edge
     edge_neighbor_voxel = coords.reshape(N, 1, 1, 3) + _edge_neighbor_voxel_offset
     connected_voxel = edge_neighbor_voxel[intersected_flag]
@@ -98,14 +91,40 @@ def flexible_dual_grid_to_mesh(
     if M == 0:
         return torch.zeros(0, 3, device=device), torch.zeros(0, 3, dtype=torch.long, device=device)
 
-    # Look up neighbor indices via dict
-    connected_cpu = connected_voxel.cpu().reshape(-1, 3)
-    indices = []
-    for j in range(connected_cpu.shape[0]):
-        key = (connected_cpu[j, 0].item(), connected_cpu[j, 1].item(), connected_cpu[j, 2].item())
-        indices.append(coord_to_idx.get(key, 0xFFFFFFFF))
+    # Vectorized replacement for the coord->index dict lookup. The original built a
+    # Python dict {coord_tuple: i} (last i wins on duplicate coords) and queried it
+    # with .get(key, 0xFFFFFFFF). We reproduce that exactly with an injective int64
+    # coordinate hash + torch.unique/searchsorted. All int64 work stays on CPU (MPS
+    # has weak int64 support and the original did the dict work on CPU too).
+    coords_cpu = coords.cpu().to(torch.int64)
+    connected_cpu = connected_voxel.cpu().reshape(-1, 3).to(torch.int64)
 
-    connected_voxel_indices = torch.tensor(indices, dtype=torch.int64, device=device).reshape(M, 4)
+    # Shared bounds over keys and queries so the encoding is a perfect (collision-free)
+    # hash across every coordinate we touch.
+    lo = torch.minimum(coords_cpu.amin(dim=0), connected_cpu.amin(dim=0))
+    hi = torch.maximum(coords_cpu.amax(dim=0), connected_cpu.amax(dim=0))
+    extent = (hi - lo + 1).tolist()
+
+    def _encode(c):
+        rel = c - lo
+        return (rel[:, 0] * extent[1] + rel[:, 1]) * extent[2] + rel[:, 2]
+
+    key = _encode(coords_cpu)
+    query = _encode(connected_cpu)
+
+    # Perfect-hash map with last-index-wins semantics (matches dict overwrite order).
+    unique_keys, inverse = torch.unique(key, sorted=True, return_inverse=True)
+    rep = torch.full((unique_keys.shape[0],), -1, dtype=torch.int64)
+    rep.scatter_reduce_(
+        0, inverse, torch.arange(N, dtype=torch.int64), reduce="amax", include_self=True
+    )
+
+    # Look up each query; missing keys map to 0xFFFFFFFF, exactly like dict.get().
+    pos = torch.searchsorted(unique_keys, query).clamp_(max=unique_keys.shape[0] - 1)
+    found = unique_keys[pos] == query
+    indices = torch.where(found, rep[pos], torch.tensor(0xFFFFFFFF, dtype=torch.int64))
+
+    connected_voxel_indices = indices.to(device).reshape(M, 4)
     connected_voxel_valid = (connected_voxel_indices != 0xFFFFFFFF).all(dim=1)
     quad_indices = connected_voxel_indices[connected_voxel_valid].long()
     L = quad_indices.shape[0]

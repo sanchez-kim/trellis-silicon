@@ -140,7 +140,7 @@ TRELLIS.2 depends on several CUDA-only libraries. Each is replaced with a backen
 | Original (CUDA) | Replacement | Purpose |
 |---|---|---|
 | `flex_gemm` | `mtlgemm` (Pedro Naugusto's Metal port), with `backends/conv_none.py` fallback | Sparse 3D convolution |
-| `o_voxel._C` hashmap | `backends/mesh_extract.py` | Mesh extraction from the dual voxel grid (pure Python) |
+| `o_voxel._C` hashmap | `backends/mesh_extract.py` | Mesh extraction from the dual voxel grid (pure PyTorch) |
 | `flash_attn` | PyTorch SDPA | Attention for the sparse transformers (padded, not fused) |
 | `cumesh` | Skipped during decode | Crashes the Metal port on decoder-sized meshes; replaced by `fast_simplification` before baking |
 | `nvdiffrast` | `mtldiffrast` (Metal), with pure-Python fallback | Differentiable rasterization for texture baking |
@@ -151,7 +151,7 @@ All hardcoded `.cuda()` calls are patched to use the active device.
 
 **Sparse 3D convolution** (`backends/conv_none.py`): submanifold sparse convolution via a spatial hash of active voxels — gather neighbor features per kernel position, apply weights by matmul, scatter-add back. Neighbor maps are cached per tensor.
 
-**Mesh extraction** (`backends/mesh_extract.py`): reimplements `flexible_dual_grid_to_mesh` with Python dicts instead of CUDA hashmaps — a coord→index table, connected voxels per edge, quad triangulation by normal alignment.
+**Mesh extraction** (`backends/mesh_extract.py`): reimplements `flexible_dual_grid_to_mesh` without CUDA hashmaps — the coord→index lookup is a collision-free int64 coordinate hash resolved with `torch.unique` + `searchsorted`, then connected voxels per edge and quad triangulation by normal alignment.
 
 **Attention** (patched `full_attn.py`): adds an SDPA backend to the sparse attention module. Variable-length sequences are padded into a batch, run through `torch.nn.functional.scaled_dot_product_attention`, then unpadded.
 
