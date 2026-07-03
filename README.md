@@ -109,9 +109,6 @@ Generation time is roughly linear in the sampler step count. Dropping from the d
 trellis-silicon photo.png --steps 8
 ```
 
-![steps 12 vs 8 vs 6](docs/assets/steps_comparison_grid.png)
-
-*Top to bottom: 12 (default), 8, 6 steps. See [`docs/experiments.md`](docs/experiments.md) for the full quality/speed analysis.*
 
 ### Web UI
 
@@ -132,7 +129,6 @@ src/trellis_silicon/
   patches/       # trellis-silicon-patch   — idempotent TRELLIS.2 source patchers
 TRELLIS.2/       # upstream checkout (cloned by setup.sh, patched in place)
 tools/           # profiling + benchmark scripts
-docs/            # experiments writeup + assets
 ```
 
 TRELLIS.2 itself is not vendored in git; `setup.sh` clones it and `trellis-silicon-patch` (`python -m trellis_silicon.patches`) rewrites its CUDA-only paths in place. Every patch is guarded by a marker string, so re-running is idempotent.
@@ -163,7 +159,7 @@ All hardcoded `.cuda()` calls are patched to use the active device.
 
 ## Performance
 
-This project ran a measurement-first optimization campaign on top of the base port. Full writeup — including the hypotheses that turned out wrong — is in [`docs/experiments.md`](docs/experiments.md). The adopted wins:
+This project ran a measurement-first optimization campaign on top of the base port. The adopted wins:
 
 | Optimization | Effect | Notes |
 |---|---|---|
@@ -172,7 +168,7 @@ This project ran a measurement-first optimization campaign on top of the base po
 | CFG batching | generation 197.3s → 181.9s (−7.8%) | The two classifier-free-guidance forwards run as one batch-2 forward; mesh is bit-identical. Opt out with `CFG_BATCH=0` |
 | Step-count fast mode | generation −39% at `--steps 8` | Quality/speed tradeoff, off by default (see [fast mode](#fast-mode)) |
 
-Both load and generation optimizations are on by default and verified to leave the output mesh unchanged (or, for CFG batching, identical to floating-point rounding). Two paths we investigated and **rejected**: keeping models resident (`--resident` — measured slower from memory pressure), and `torch.compile` (inductor is ~2× slower than eager on MPS in the current PyTorch). Both are documented in the writeup.
+Both load and generation optimizations are on by default and verified to leave the output mesh unchanged (or, for CFG batching, identical to floating-point rounding). Two paths we investigated and **rejected**: keeping models resident (`--resident` — measured slower from memory pressure), and `torch.compile` (inductor is ~2× slower than eager on MPS in the current PyTorch).
 
 Memory peaks around 18GB of unified memory during generation. The first-ever run also downloads ~15GB of HuggingFace weights (TRELLIS.2, DINOv3, RMBG-2.0), which is network-bound and not counted above.
 
@@ -189,7 +185,6 @@ Memory peaks around 18GB of unified memory during generation. The first-ever run
 
 - `tools/profile_attn.py` — instrumented profiling harness for MPS bottlenecks (attention share, CPU fallbacks, per-phase breakdown).
 - `tools/bench/` — the benchmark and numerical-sanity scripts behind the optimization campaign (CFG-batching bit-exactness, skip-init verification, load-time splits, the step-comparison renderer).
-- `docs/experiments.md` — the full optimization writeup.
 
 The package is a standard src-layout project; `uv pip install -e .` gives you the three console scripts and importable `trellis_silicon` package. Set `TRELLIS2_ROOT` to point the patcher/runtime at a non-standard TRELLIS.2 location.
 

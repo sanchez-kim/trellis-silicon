@@ -17,3 +17,6 @@ deps/
 .omc/
 .serena/
 outputs/
+
+# Local-only blog/experiment notes
+docs/
