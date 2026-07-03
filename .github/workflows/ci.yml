@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    # macos-15 runners are Apple Silicon (arm64), matching the target platform.
+    # No model weights are downloaded — this covers lint, unit tests, and the
+    # patcher against the pinned TRELLIS.2 checkout.
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: requirements.lock
+
+      - name: Install locked dependencies
+        run: |
+          uv venv .venv --python 3.11
+          uv pip install --python .venv/bin/python -r requirements.lock
+          uv pip install --python .venv/bin/python -e . --no-deps
+          uv pip install --python .venv/bin/python pytest ruff
+
+      - name: Lint
+        run: |
+          .venv/bin/ruff check src/
+          .venv/bin/ruff format --check src/
+
+      - name: Unit tests
+        run: .venv/bin/python -m pytest tests/ -q
+
+      - name: Patcher smoke test (pinned TRELLIS.2, idempotency)
+        run: |
+          # Single source of truth for the pin lives in setup.sh
+          TRELLIS2_COMMIT=$(sed -n 's/^TRELLIS2_COMMIT="\${TRELLIS2_COMMIT:-\(.*\)}"$/\1/p' setup.sh)
+          test -n "$TRELLIS2_COMMIT" || { echo "could not parse TRELLIS2_COMMIT from setup.sh"; exit 1; }
+          git init -q TRELLIS.2
+          git -C TRELLIS.2 remote add origin https://github.com/microsoft/TRELLIS.2.git
+          git -C TRELLIS.2 fetch -q --depth 1 origin "$TRELLIS2_COMMIT"
+          git -C TRELLIS.2 checkout -q FETCH_HEAD
+          echo "--- patcher run 1 (fresh tree) ---"
+          .venv/bin/python -m trellis_silicon.patches
+          echo "--- patcher run 2 (idempotency) ---"
+          .venv/bin/python -m trellis_silicon.patches

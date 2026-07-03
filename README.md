@@ -188,6 +188,12 @@ Memory peaks around 18GB of unified memory during generation. The first-ever run
 
 The package is a standard src-layout project; `uv pip install -e .` gives you the three console scripts and importable `trellis_silicon` package. Set `TRELLIS2_ROOT` to point the patcher/runtime at a non-standard TRELLIS.2 location.
 
+Reproducibility and CI:
+
+- `requirements.lock` pins the exact dependency versions the verification baseline was established with; `setup.sh` installs from it. Upgrading a dependency can shift floating-point behavior (and therefore the deterministic output mesh) even at the same PyTorch version — re-verify after any upgrade.
+- `setup.sh` clones TRELLIS.2 at a pinned upstream commit (the one the patches were validated against). Set `TRELLIS2_COMMIT=<sha>` (or `HEAD`) to override.
+- `tests/` holds the unit suite (`pytest tests/`), including bit-exactness tests that pin the vectorized mesh extraction against the original dict-based implementation. CI (GitHub Actions, Apple Silicon runners) runs lint, the unit suite, and a patcher idempotency check against the pinned TRELLIS.2 — no model weights involved.
+
 ## License
 
 The code in this repository (backends, patches, package, scripts) is released under the MIT License. Upstream model weights carry their own licenses:
