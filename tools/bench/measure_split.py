@@ -6,7 +6,9 @@ import torch
 from safetensors.torch import load_file
 from trellis2 import models as tmodels
 
-REPO = "/Users/sanchez/.cache/huggingface/hub/models--microsoft--TRELLIS.2-4B/snapshots/af44b45f2e35a493886929c6d786e563ec68364d"
+from huggingface_hub import snapshot_download
+
+REPO = os.environ.get("TRELLIS2_REPO") or snapshot_download("microsoft/TRELLIS.2-4B")
 model_map = json.load(open(os.path.join(REPO, "pipeline.json")))['args']['models']
 
 def resolve(name):

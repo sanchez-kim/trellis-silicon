@@ -1,10 +1,10 @@
 """
 Shared core for TRELLIS.2 image-to-3D generation on Apple Silicon.
 
-Both generate.py (CLI) and app.py (Gradio UI) import this module so the two
+Both cli.py (CLI) and webui.py (Gradio UI) import this module so the two
 front-ends run through exactly one code path. IMPORTANT: importing this module
 performs the backend/environment setup below, and that setup MUST run before
-torch or trellis are imported anywhere — the same constraint generate.py had
+torch or trellis are imported anywhere — the same constraint the CLI had
 when this code lived at its top. Keep the os.environ/sys.path block first.
 """
 
@@ -89,7 +89,7 @@ def watchdog_help_message():
         "  3. SPARSE_CONV_BACKEND=none trellis-silicon ... (slower path,\n"
         "     may not help if a single dispatch is the offender)\n"
         "\n"
-        "Tracking issue: https://github.com/shivampkumar/trellis-mac/issues\n"
+        "Tracking issue: https://github.com/sanchez-kim/trellis-silicon/issues\n"
     )
 
 

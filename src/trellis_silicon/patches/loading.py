@@ -69,7 +69,6 @@ def patch_pipeline_conditional_load():
         "            '512': ['shape_slat_flow_model_512', 'tex_slat_flow_model_512'],\n"
         "            '1024': ['shape_slat_flow_model_1024', 'tex_slat_flow_model_1024'],\n"
         "            '1024_cascade': ['shape_slat_flow_model_512', 'shape_slat_flow_model_1024', 'tex_slat_flow_model_1024'],\n"
-        "            '1536_cascade': ['shape_slat_flow_model_512', 'shape_slat_flow_model_1024', 'tex_slat_flow_model_1024'],\n"
         "        }\n"
         "        if pipeline_type not in extra:\n"
         "            return None\n"

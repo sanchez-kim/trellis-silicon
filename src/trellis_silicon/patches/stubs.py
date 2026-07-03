@@ -1,7 +1,7 @@
 """Stub/backend installers: copy the pure-PyTorch sparse conv backend and the
-pure-Python mesh extraction into place, and install stub packages for the
-CUDA-only libraries. These write into TRELLIS.2 and the runtime stubs/ dir;
-they do not rewrite TRELLIS.2 source in place like the patch_* functions."""
+pure-Python mesh extraction into place. These write into TRELLIS.2 and the
+runtime stubs/ dir; they do not rewrite TRELLIS.2 source in place like the
+patch_* functions."""
 
 import os
 import shutil
@@ -63,11 +63,3 @@ def install_mesh_extract():
     with open(os.path.join(ovoxel_dir, "rasterize.py"), "w") as f:
         f.write("class VoxelRenderer:\n    def __init__(self, *args, **kwargs):\n")
         f.write('        raise RuntimeError("o_voxel.rasterize requires CUDA")\n')
-
-
-def install_stubs():
-    """Create all stub modules for CUDA-only libraries."""
-    from ..backends.stubs import install_stubs as _install
-
-    _install(STUBS_DIR)
-    print("  Installed stub packages in stubs/")
