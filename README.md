@@ -33,6 +33,18 @@ On a warm Apple Silicon machine (pipeline type `512`, weights cached, full Metal
 
 *Sample image: ["Brighella on a pedestal"](https://www.metmuseum.org/art/collection/search/201769) (1710-13), The Metropolitan Museum of Art — public domain (CC0).*
 
+> Preview images in this README are rendered headless with `tools/render_preview.py`; for interactive inspection open the GLB in Blender or [gltf-viewer](https://gltf-viewer.donmccurdy.com).
+
+## How this differs from trellis-mac
+
+[trellis-mac](https://github.com/shivampkumar/trellis-mac) proved TRELLIS.2 could run on Apple Silicon at all. This project builds on that port and focuses on making it something you can install, trust, and keep using:
+
+- **Packaged** — a src-layout Python package with three console scripts and a Gradio web UI, instead of loose scripts.
+- **Reproducible** — TRELLIS.2 pinned to a validated upstream commit, locked Python dependencies, a deterministic verification gate (fixed seed → exact mesh counts), a unit-test suite, and CI on Apple Silicon runners.
+- **Faster** — a measurement-first performance pass: conditional checkpoint loading + skip-init (pipeline load ~103s → ~19s warm), batched classifier-free guidance (−7.8% generation), vectorized mesh extraction (67× on that step). Warm end-to-end ~300s → ~197s with unchanged output, ~143s in fast mode.
+- **Measured, including the failures** — the optimization campaign documents its dead ends (fused varlen attention kernels, `torch.compile` on MPS, model residency) so nobody re-walks them; see [Performance](#performance).
+- **Verified beyond 512** — the `1024` and `1024_cascade` pipelines are exercised on-device, not just theoretically supported.
+
 ## Requirements
 
 - macOS on Apple Silicon (M1 or later)
@@ -113,6 +125,29 @@ Generation time is roughly linear in the sampler step count. Dropping from the d
 trellis-silicon photo.png --steps 8
 ```
 
+### Maximum quality
+
+The default `512` pipeline is the speed/quality sweet spot. If you can wait, the higher-resolution pipelines produce ~4× denser raw geometry, and `--texture-size 2048` doubles the texture resolution:
+
+```bash
+trellis-silicon photo.png --pipeline-type 1024_cascade --texture-size 2048
+```
+
+| | `512` (default) | `1024` | `1024_cascade` |
+|---|---|---|---|
+| Raw mesh | ~1.0M triangles | ~4.0M | ~4.2M |
+| Wall time (warm machine, single indicative runs) | ~3.5 min | ~17 min | ~19 min |
+
+<p>
+<img src="assets/quality_compare.png" width="720" alt="512 default output next to 1024_cascade with 2K textures">
+</p>
+
+The gain at GLB level is mostly texture fidelity and surface cleanliness rather than raw density (see the decimation note below). The high-res pipelines also expose more of the small holes that hole-filling would normally close.
+
+Two things cap output quality relative to the CUDA original regardless of settings:
+
+- **Pre-bake decimation.** Every mesh is simplified to ~200K faces before texture baking (the Metal BVH builder is unstable on larger inputs), so the extra geometry from the 1024 pipelines improves silhouettes and reduces surface artifacts rather than surviving verbatim into the GLB. Pass `--obj` to also export the full-resolution mesh.
+- **Hole filling disabled.** Decode-time hole filling needs `cumesh`, whose Metal port crashes on decoder-sized meshes; outputs may have small holes the CUDA path would close.
 
 ### Web UI
 
