@@ -4,6 +4,10 @@ Run [TRELLIS.2](https://github.com/microsoft/TRELLIS.2) image-to-3D generation n
 
 TRELLIS.2 is Microsoft Research's state-of-the-art image-to-3D model. It ships CUDA-only. This project runs it on Apple Silicon through PyTorch's MPS backend: a single image in, a textured 400K+-vertex GLB out, entirely on your Mac's GPU.
 
+<p align="center">
+<img src="assets/demo.gif" width="720" alt="Input image and the generated 3D mesh rotating on a turntable">
+</p>
+
 It builds on [trellis-mac](https://github.com/shivampkumar/trellis-mac) by Shivam P Kumar — the original CUDA-to-Apple-Silicon port — and continues independently, packaged as an installable Python project with an additional performance pass (see [Performance](#performance)).
 
 ## Results
