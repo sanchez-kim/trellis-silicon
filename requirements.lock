@@ -3,7 +3,7 @@
 # 512,320 verts / 1,056,832 tris) was established with. Local Metal packages
 # (deps/) and the editable package itself are installed separately by setup.sh.
 # Regenerate after a deliberate upgrade + gate re-verification:
-#   uv pip freeze | grep -v '@ file://' | grep -vE '^(pytest|pluggy|iniconfig)==' > requirements.lock
+#   uv pip freeze | grep -v 'file://' | grep -vE '^(pytest|pluggy|iniconfig)==' > requirements.lock
 accelerate==1.14.0
 annotated-doc==0.0.4
 annotated-types==0.7.0
@@ -73,7 +73,6 @@ torchaudio==2.11.0
 torchvision==0.27.1
 tqdm==4.68.3
 transformers==5.12.1
--e file:///Users/sanchez/Desktop/projects/trellis-silicon
 trimesh==4.12.2
 typer==0.25.1
 typing-extensions==4.16.0
