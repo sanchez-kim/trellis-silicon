@@ -43,10 +43,23 @@ clone_dep https://github.com/pedronaugusto/mtlmesh.git       mtlmesh
 clone_dep https://github.com/pedronaugusto/mtlgemm.git       mtlgemm
 clone_dep https://github.com/pedronaugusto/trellis2-apple.git trellis2-apple
 
-# TRELLIS.2 lives at the project root (the patcher and package expect it there)
+# TRELLIS.2 lives at the project root (the patcher and package expect it there).
+# Pinned to the commit the patches and the verification gate were validated
+# against — upstream moves and can break the patch markers. Override with
+# TRELLIS2_COMMIT=<sha> (or TRELLIS2_COMMIT=HEAD for an unpinned clone) at
+# your own risk.
+TRELLIS2_COMMIT="${TRELLIS2_COMMIT:-75fbf0183001ed9876c8dbb35de6b68552ee08bd}"
 if [ ! -d "TRELLIS.2" ]; then
-    echo "Cloning TRELLIS.2 ..."
-    git clone --depth 1 https://github.com/microsoft/TRELLIS.2.git TRELLIS.2
+    if [ "$TRELLIS2_COMMIT" = "HEAD" ]; then
+        echo "Cloning TRELLIS.2 (unpinned HEAD) ..."
+        git clone --depth 1 https://github.com/microsoft/TRELLIS.2.git TRELLIS.2
+    else
+        echo "Cloning TRELLIS.2 (pinned @ ${TRELLIS2_COMMIT:0:12}) ..."
+        git init -q TRELLIS.2
+        git -C TRELLIS.2 remote add origin https://github.com/microsoft/TRELLIS.2.git
+        git -C TRELLIS.2 fetch -q --depth 1 origin "$TRELLIS2_COMMIT"
+        git -C TRELLIS.2 checkout -q FETCH_HEAD
+    fi
 else
     echo "  TRELLIS.2 already cloned — skipping"
 fi
@@ -77,9 +90,12 @@ if command -v uv &>/dev/null; then
 else
     PIP="pip install"
 fi
-# Editable install: pulls the runtime deps from pyproject.toml and registers the
-# trellis-silicon / trellis-silicon-web / trellis-silicon-patch console scripts.
-$PIP -e .
+# Install the locked dependency set first (the exact versions the verification
+# gate baseline was established with — see requirements.lock), then the package
+# itself without re-resolving deps. This registers the trellis-silicon /
+# trellis-silicon-web / trellis-silicon-patch console scripts.
+$PIP -r requirements.lock
+$PIP -e . --no-deps
 $PIP "$DEPS_DIR/utils3d"
 
 # Optional Metal acceleration for texture baking.
