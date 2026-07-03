@@ -1,0 +1,78 @@
+name: Bug report
+description: Report a problem running TRELLIS-Silicon
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened? What did you expect to happen?
+    validations:
+      required: true
+
+  - type: input
+    id: command
+    attributes:
+      label: Command that was run
+      placeholder: "trellis-silicon photo.png --pipeline-type 512"
+
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      placeholder: "macOS 15.3 (Sequoia)"
+    validations:
+      required: true
+
+  - type: input
+    id: chip-memory
+    attributes:
+      label: Chip + unified memory
+      placeholder: "M2 Pro, 32GB"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: pipeline-type
+    attributes:
+      label: Pipeline type
+      options:
+        - "512"
+        - "1024"
+        - "1024_cascade"
+      default: 0
+
+  - type: dropdown
+    id: thermal-state
+    attributes:
+      label: Was the machine already hot / under sustained load?
+      description: >-
+        Apple Silicon thermal throttling can make the same run several times
+        slower with no code path change. Please reproduce performance issues
+        on a cool machine before reporting them.
+      options:
+        - cool
+        - warm
+        - hot
+        - not sure
+
+  - type: dropdown
+    id: metal-toolchain
+    attributes:
+      label: Metal toolchain installed?
+      options:
+        - "yes"
+        - "no"
+        - not sure
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: >-
+        Paste the relevant stderr/stdout. Note: a
+        `kIOGPUCommandBufferCallbackErrorImpactingInteractivity` line in
+        stderr means the macOS GPU watchdog killed a Metal kernel — this is a
+        known failure mode with documented workarounds in the CLI's error
+        message.
+      render: shell
