@@ -16,3 +16,4 @@ deps/
 # Session-tool state
 .omc/
 .serena/
+outputs/
