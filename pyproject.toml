@@ -38,7 +38,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["ruff"]
+dev = ["ruff", "pytest"]
 
 [project.scripts]
 trellis-silicon = "trellis_silicon.cli:main"
