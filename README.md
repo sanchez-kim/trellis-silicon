@@ -8,19 +8,33 @@ TRELLIS.2 is Microsoft Research's state-of-the-art image-to-3D model. It ships C
 <img src="assets/demo.gif" width="720" alt="Input image and the generated 3D mesh rotating on a turntable">
 </p>
 
-It builds on [trellis-mac](https://github.com/shivampkumar/trellis-mac) by Shivam P Kumar — the original CUDA-to-Apple-Silicon port — and continues independently, packaged as an installable Python project with an additional performance pass (see [Performance](#performance)).
+## TL;DR
 
-## Results
+- **One command**: `trellis-silicon photo.png` → GLB with baked PBR textures. Web UI: `trellis-silicon-web`.
+- **Fast**: warm runs take **~19s load + ~2.5-3 min generation** (default `512` pipeline). The performance pass over the base port cut load **5×** (~103s → ~19s) and total warm time **~37%** (~300s → ~190s); `--steps 8` fast mode lands near ~140s with almost no visible quality loss.
+- **Where the speed came from** (measured, not guessed): skipping a weight init that gets overwritten anyway, loading only the checkpoints the pipeline uses, batching the two CFG forwards, swapping MPS SDPA for a naive attention that is 3.3-3.9× faster at these shapes, and vectorizing mesh extraction (67×). Full story in [Performance](#performance) — including five intuitive optimizations that measurement killed.
+- **Quality is tunable**: defaults favor speed; `--pipeline-type 1024_cascade --texture-size 2048` plus `BAKE_MAX_FACES=800000` for maximum quality (see [Maximum quality](#maximum-quality)).
+- **Reproducible**: pinned upstream commit, locked dependencies, deterministic verification gate, tests + CI on Apple Silicon runners.
+
+## Quickstart
+
+```bash
+git clone https://github.com/sanchez-kim/trellis-silicon.git && cd trellis-silicon
+xcodebuild -downloadComponent MetalToolchain  # optional: Metal-accelerated texture baker
+hf auth login                                 # gated weights — approve DINOv3 + RMBG-2.0 on HF first
+bash setup.sh && source .venv/bin/activate
+trellis-silicon photo.png                     # → photo.glb (first run downloads ~15GB of weights)
+```
+
+Requires macOS on Apple Silicon (M1+), Python 3.11+, 24GB+ unified memory recommended. Details, gated-model links, and troubleshooting in [Installation](#installation).
+
+---
+
+This project builds on [trellis-mac](https://github.com/shivampkumar/trellis-mac) by Shivam P Kumar — the original CUDA-to-Apple-Silicon port — and continues independently, packaged as an installable Python project with an additional performance pass.
+
+## Example
 
 From a single image, TRELLIS-Silicon generates a **400K+ vertex mesh with baked PBR textures** (base color, metallic, roughness) as a ready-to-use GLB.
-
-On a warm Apple Silicon machine (pipeline type `512`, weights cached, full Metal stack):
-
-- **Pipeline load:** ~19s (once per process)
-- **Generation:** ~2.5-3 min at the default 12 steps, well under 2 min with `--steps 8` (see [fast mode](#fast-mode))
-- **Texture bake:** ~10-15s
-
-### Example
 
 **Input image** &rarr; **Generated 3D mesh** (~500K vertices, ~1M triangles) with Metal-baked PBR textures:
 
