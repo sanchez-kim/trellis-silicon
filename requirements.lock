@@ -1,6 +1,6 @@
 # Locked runtime environment for trellis-silicon.
 # These are the exact versions the verification-gate baseline (seed 42 ->
-# 512,320 verts / 1,056,832 tris) was established with. Local Metal packages
+# 512,907 verts / 1,067,926 tris) was established with. Local Metal packages
 # (deps/) and the editable package itself are installed separately by setup.sh.
 # Regenerate after a deliberate upgrade + gate re-verification:
 #   uv pip freeze | grep -v 'file://' | grep -vE '^(pytest|pluggy|iniconfig)==' > requirements.lock

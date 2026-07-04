@@ -33,7 +33,7 @@ Any change that can affect generation must reproduce the deterministic
 baseline:
 
 - **seed 42 + `assets/brighella_input.png` + `512` pipeline → exactly
-  512,320 vertices / 1,056,832 triangles.**
+  512,907 vertices / 1,067,926 triangles.**
 
 Changes that only reorder floating-point ops (batching, kernel swaps) instead
 need to stay within ±1% of that baseline, with the GLB loading successfully

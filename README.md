@@ -17,7 +17,7 @@ From a single image, TRELLIS-Silicon generates a **400K+ vertex mesh with baked 
 On a warm Apple Silicon machine (pipeline type `512`, weights cached, full Metal stack):
 
 - **Pipeline load:** ~19s (once per process)
-- **Generation:** ~3 min at the default 12 steps, ~2 min with `--steps 8` (see [fast mode](#fast-mode))
+- **Generation:** ~2.5-3 min at the default 12 steps, well under 2 min with `--steps 8` (see [fast mode](#fast-mode))
 - **Texture bake:** ~10-15s
 
 ### Example
@@ -41,7 +41,7 @@ On a warm Apple Silicon machine (pipeline type `512`, weights cached, full Metal
 
 - **Packaged** — a src-layout Python package with three console scripts and a Gradio web UI, instead of loose scripts.
 - **Reproducible** — TRELLIS.2 pinned to a validated upstream commit, locked Python dependencies, a deterministic verification gate (fixed seed → exact mesh counts), a unit-test suite, and CI on Apple Silicon runners.
-- **Faster** — a measurement-first performance pass: conditional checkpoint loading + skip-init (pipeline load ~103s → ~19s warm), batched classifier-free guidance (−7.8% generation), vectorized mesh extraction (67× on that step). Warm end-to-end ~300s → ~197s with unchanged output, ~143s in fast mode.
+- **Faster** — a measurement-first performance pass: conditional checkpoint loading + skip-init (pipeline load ~103s → ~19s warm), batched classifier-free guidance (−7.8% generation), a naive dense-attention backend that beats PyTorch's MPS SDPA by 3.3-3.9× at the structure-phase shapes (−19% generation), vectorized mesh extraction (67× on that step). Warm end-to-end roughly halved overall; see [Performance](#performance).
 - **Measured, including the failures** — the optimization campaign documents its dead ends (fused varlen attention kernels, `torch.compile` on MPS, model residency) so nobody re-walks them; see [Performance](#performance).
 - **Verified beyond 512** — the `1024` and `1024_cascade` pipelines are exercised on-device, not just theoretically supported.
 
@@ -193,7 +193,7 @@ TRELLIS.2 depends on several CUDA-only libraries. Each is replaced with a backen
 |---|---|---|
 | `flex_gemm` | `mtlgemm` (Pedro Naugusto's Metal port), with `backends/conv_none.py` fallback | Sparse 3D convolution |
 | `o_voxel._C` hashmap | `backends/mesh_extract.py` | Mesh extraction from the dual voxel grid (pure PyTorch) |
-| `flash_attn` | PyTorch SDPA | Attention for the sparse transformers (padded, not fused) |
+| `flash_attn` | PyTorch SDPA (sparse path) / naive unfused (dense path) | Attention; the unfused dense path is a measured 3.3-3.9× win over MPS SDPA |
 | `cumesh` | Skipped during decode | Crashes the Metal port on decoder-sized meshes; replaced by `fast_simplification` before baking |
 | `nvdiffrast` | `mtldiffrast` (Metal), with pure-Python fallback | Differentiable rasterization for texture baking |
 
@@ -218,6 +218,8 @@ This project ran a measurement-first optimization campaign on top of the base po
 | Conditional checkpoint loading | load ~103s → ~55-65s | `512` pipeline skips the two unused ~2.4GB `*_1024` flow models |
 | Skip-init on load | load ~56s → **~19s** (warm) | The xavier init is immediately overwritten by `load_state_dict`; skipping it is bit-identical. Opt out with `SKIP_INIT_ON_LOAD=0` |
 | CFG batching | generation 197.3s → 181.9s (−7.8%) | The two classifier-free-guidance forwards run as one batch-2 forward; mesh is bit-identical. Opt out with `CFG_BATCH=0` |
+| Naive dense attention | structure phase ~1.75×, generation **−19%** (same-window A/B: 211.5s → ~170s) | PyTorch's fused SDPA is pathologically slow on MPS at the structure-phase shape (B=2, S=4096, H=12, D=128, bf16) — a textbook unfused `softmax(qkᵀ)v` measures 3.3–3.9× faster at both self- and cross-attention shapes, at bf16-level numerical noise. Opt out with `ATTN_BACKEND=sdpa` |
+| Vectorized mesh extraction | extraction step 8.8s → 0.13s | The coord→index dict loops became an int64 perfect hash + `torch.unique`; bit-identical output |
 | Step-count fast mode | generation −39% at `--steps 8` | Quality/speed tradeoff, off by default (see [fast mode](#fast-mode)) |
 
 Both load and generation optimizations are on by default and verified to leave the output mesh unchanged (or, for CFG batching, identical to floating-point rounding). Two paths we investigated and **rejected**: keeping models resident (`--resident` — measured slower from memory pressure), and `torch.compile` (inductor is ~2× slower than eager on MPS in the current PyTorch).
@@ -229,7 +231,7 @@ Memory peaks around 18GB of unified memory during generation. The first-ever run
 ## Limitations
 
 - **Hole filling disabled.** Decode-time hole filling needs `cumesh`, whose Metal port segfaults on decoder-sized meshes, so it is skipped. Output meshes may have small holes.
-- **Attention is not fused.** Attention runs through PyTorch SDPA rather than a fused Metal kernel. Profiling (`tools/profile_attn.py`) shows dense attention is ~63% of the structure sampling phase, so a flash-style Metal kernel for the *dense* path could still help — but a fused *varlen/sparse* kernel would not: single-image inference is batch-1 with zero padding waste.
+- **Attention is not fused.** Dense (structure-phase) attention runs through a naive unfused implementation — measured 3.3-3.9× *faster* than PyTorch's fused MPS SDPA at these shapes — and sparse attention through padded SDPA. Roofline analysis bounds what a hand-written flash-style Metal kernel could add on top at ~6% end-to-end, which we judged not worth the engineering cost. A fused *varlen/sparse* kernel would not help at all: single-image inference is batch-1 with zero padding waste.
 - **Pre-simplified before bake.** By default the mesh is decimated to ~200K faces before Metal BVH construction. Raise the cap with `BAKE_MAX_FACES` (see [Maximum quality](#maximum-quality)) or pass `--obj` for the full-resolution mesh (written before simplification).
 - **Inference only.** No training support.
 

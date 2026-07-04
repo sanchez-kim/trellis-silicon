@@ -22,7 +22,17 @@ from . import _paths
 # ops crash instead of falling back to CPU.
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
-os.environ.setdefault("ATTN_BACKEND", "sdpa")
+# Dense attention (structure phase only — sparse_structure_flow's self+cross
+# attn) defaults to the naive unfused path. At the structure shapes on MPS
+# (B=2 CFG, H=12, D=128, bf16; self S=4096, cross q=4096/kv=1029) a naive
+# softmax(q@kT*scale)@v measures ~3.3x (self) / ~3.9x (cross) faster than
+# torch's fused SDPA, which is slow on MPS at these sizes. Numerics stay at
+# bf16 noise (~4e-3 vs fp32). The naive path materializes an ~805MB bf16 S×S
+# score tensor per self-attn call — fine on unified memory here. The 'naive'
+# and 'sdpa' backends both ship in the pinned TRELLIS.2 dense dispatch
+# (trellis2/modules/attention/full_attn.py), so no source patch is needed.
+# Escape hatch: ATTN_BACKEND=sdpa restores the fused path.
+os.environ.setdefault("ATTN_BACKEND", "naive")
 os.environ.setdefault("SPARSE_ATTN_BACKEND", "sdpa")
 try:
     import flex_gemm  # noqa: F401
