@@ -33,7 +33,17 @@ os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 # (trellis2/modules/attention/full_attn.py), so no source patch is needed.
 # Escape hatch: ATTN_BACKEND=sdpa restores the fused path.
 os.environ.setdefault("ATTN_BACKEND", "naive")
-os.environ.setdefault("SPARSE_ATTN_BACKEND", "sdpa")
+# Sparse attention (shape/tex SLat flow models' padded self+cross attn) also
+# defaults to naive. At the shape/tex SLat shapes (self-attn B=2/1, S=1591;
+# cross-attn kv=1029; H=12, D=128, bf16) naive measures ~4.0-4.1x faster than
+# SDPA — an even bigger win than the dense case. Padding is zero-waste for
+# every real call site here (CFG-batched self/cross-attn always duplicates
+# the same sparse coords across the batch, so seqlens are always uniform),
+# so the naive path's lack of an explicit attn_mask is exactly as correct as
+# the existing sdpa path, not less. patches/attention.py adds a real separate
+# 'naive' branch to the sparse dispatch (previously it aliased 'sdpa').
+# Escape hatch: SPARSE_ATTN_BACKEND=sdpa restores the fused path.
+os.environ.setdefault("SPARSE_ATTN_BACKEND", "naive")
 try:
     import flex_gemm  # noqa: F401
 
