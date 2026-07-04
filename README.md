@@ -63,7 +63,7 @@ From a single image, TRELLIS-Silicon generates a **400K+ vertex mesh with baked 
 
 - macOS on Apple Silicon (M1 or later)
 - Python 3.11+
-- 24GB+ unified memory recommended (the 4B model is large)
+- 24GB+ unified memory recommended (the 4B model is large); measured peak process memory on one machine (512 pipeline, default settings) was ~12-14GB, occurring during pipeline load rather than generation or baking — see [Memory](#memory) below if you're on a 16GB machine
 - ~15GB disk space for model weights (downloaded on first run)
 
 ## Installation
@@ -233,12 +233,27 @@ This project ran a measurement-first optimization campaign on top of the base po
 | Skip-init on load | load ~56s → **~19s** (warm) | The xavier init is immediately overwritten by `load_state_dict`; skipping it is bit-identical. Opt out with `SKIP_INIT_ON_LOAD=0` |
 | CFG batching | generation 197.3s → 181.9s (−7.8%) | The two classifier-free-guidance forwards run as one batch-2 forward; mesh is bit-identical. Opt out with `CFG_BATCH=0` |
 | Naive dense attention | structure phase ~1.75×, generation **−19%** (same-window A/B: 211.5s → ~170s) | PyTorch's fused SDPA is pathologically slow on MPS at the structure-phase shape (B=2, S=4096, H=12, D=128, bf16) — a textbook unfused `softmax(qkᵀ)v` measures 3.3–3.9× faster at both self- and cross-attention shapes, at bf16-level numerical noise. Opt out with `ATTN_BACKEND=sdpa` |
+| Naive sparse attention | shape/tex SLat sampling −38%/−44% s/it | Same finding, applied to the shape/tex SLat shapes (self-attn S=1591, cross-attn kv=1029) — naive measures ~4.0-4.1× faster than SDPA there, an even bigger win than dense. Opt out with `SPARSE_ATTN_BACKEND=sdpa` |
 | Vectorized mesh extraction | extraction step 8.8s → 0.13s | The coord→index dict loops became an int64 perfect hash + `torch.unique`; bit-identical output |
 | Step-count fast mode | generation −39% at `--steps 8` | Quality/speed tradeoff, off by default (see [fast mode](#fast-mode)) |
 
 Both load and generation optimizations are on by default and verified to leave the output mesh unchanged (or, for CFG batching, identical to floating-point rounding). Two paths we investigated and **rejected**: keeping models resident (`--resident` — measured slower from memory pressure), and `torch.compile` (inductor is ~2× slower than eager on MPS in the current PyTorch).
 
-Memory peaks around 18GB of unified memory during generation. The first-ever run also downloads ~15GB of HuggingFace weights (TRELLIS.2, DINOv3, RMBG-2.0), which is network-bound and not counted above.
+### Memory
+
+Phase-level profiling (`tools/profile_memory.py`, one M-series/32GB machine, `512` pipeline, default settings) found the peak isn't where we expected:
+
+| Phase | Peak process RSS |
+|---|---|
+| **Pipeline load** | **~12-14GB (the actual peak)** |
+| Structure/shape/tex sampling | well under 1GB above baseline |
+| Decode + texture bake | ~3GB |
+
+The peak occurs during **loading**, not during sampling or baking — checkpoint construction and dtype casting transiently need more memory than the pipeline settles into afterward. This also means process RSS (what actually determines whether a machine can run this at all) and PyTorch's MPS-only counters (`driver_allocated_memory`) disagree substantially: the MPS-only view puts the peak at ~9.4GB during texture baking, missing the larger, CPU-side loading spike entirely — because `low_vram` mode keeps not-yet-active submodels resident on the CPU side, and on unified memory that counts against the same budget even though it never touches the MPS device counters. If you're profiling this pipeline yourself, measure process RSS, not just MPS allocator stats.
+
+Practical implication: the ~12-14GB measured peak is comfortably under 24GB, and even a 16GB machine may have enough headroom depending on what else is running — this project hasn't been validated on 16GB hardware, but the earlier "peaks around 18GB" estimate look pessimistic in light of this measurement. `CFG_BATCH=0` (sequential CFG) measurably lowers memory *during sampling* (~5.8GB vs ~6.5GB driver-side) but doesn't change the global peak, since that's set during loading regardless of sampling settings.
+
+The first-ever run also downloads ~15GB of HuggingFace weights (TRELLIS.2, DINOv3, RMBG-2.0), which is network-bound and not counted above.
 
 > **Thermal note.** Apple Silicon throttles aggressively under sustained load. The *same* run can take several times longer when the machine has already been hot for a while — nothing in the code path changes. If a run is unexpectedly slow, let the machine cool for a few minutes and retry before blaming the code. All numbers above assume a cool machine.
 
