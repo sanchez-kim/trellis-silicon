@@ -33,7 +33,14 @@ Any change that can affect generation must reproduce the deterministic
 baseline:
 
 - **seed 42 + `assets/brighella_input.png` + `512` pipeline → exactly
-  512,254 vertices / 1,065,930 triangles.**
+  513,106 vertices / 1,071,104 triangles** (the `Mesh:` line, after the
+  decode-time hole fill and before the GLB export). The GLB face count is not
+  part of the gate: the Metal QEM decimation varies by a few hundred faces
+  between runs.
+
+The gate assumes the Metal toolchain is installed and decode-time hole fill is
+on (the default). With `DECODE_FILL_HOLES=0 GLB_REMESH=0` the same run
+reproduces 512,254 vertices / 1,065,930 triangles.
 
 Changes that only reorder floating-point ops (batching, kernel swaps) instead
 need to stay within ±1% of that baseline, with the GLB loading successfully

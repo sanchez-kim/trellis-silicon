@@ -37,9 +37,37 @@ else
     echo "  utils3d already cloned — skipping"
 fi
 
-clone_dep https://github.com/pedronaugusto/mtlbvh.git       mtlbvh
+# Clone a dependency at an exact commit. An existing clone at the pinned commit
+# is left alone; one at a different commit stops the script (rebuild: rm -rf deps).
+clone_dep_at() {
+    local url="$1" dir="$2" commit="$3"
+    if [ ! -d "$DEPS_DIR/$dir" ]; then
+        echo "Cloning $dir (pinned @ ${commit:0:12}) ..."
+        git init -q "$DEPS_DIR/$dir"
+        git -C "$DEPS_DIR/$dir" remote add origin "$url"
+        git -C "$DEPS_DIR/$dir" fetch -q --depth 1 origin "$commit"
+        git -C "$DEPS_DIR/$dir" checkout -q FETCH_HEAD
+    elif [ "$(git -C "$DEPS_DIR/$dir" rev-parse HEAD 2>/dev/null)" != "$commit" ]; then
+        echo "ERROR: $DEPS_DIR/$dir is not at the pinned commit ${commit:0:12}." >&2
+        echo "       Run: rm -rf deps && bash setup.sh" >&2
+        exit 1
+    else
+        echo "  $dir already cloned at the pinned commit — skipping"
+    fi
+}
+
+# mtlbvh/mtlmesh are pinned: GLB export needs fixes that older commits lack.
+#   mtlbvh  fe6660b includes bc0a534 — the BVH traversal stack (24 slots)
+#           silently dropped subtrees on meshes above ~131K triangles, so
+#           closest-triangle queries missed the nearest triangle (holey remesh,
+#           texels baked from the wrong surface).
+#   mtlmesh 5e67493 includes 16a7d0a — bounded hash probe loops and a fix for
+#           spurious weak-CAS insert failures.
+MTLBVH_COMMIT="${MTLBVH_COMMIT:-fe6660bdb7de5a12ea00bd96df2e21bdcbdd40b1}"
+MTLMESH_COMMIT="${MTLMESH_COMMIT:-5e6749356ba39b15489c99487f55840d49923da7}"
+clone_dep_at https://github.com/pedronaugusto/mtlbvh.git    mtlbvh  "$MTLBVH_COMMIT"
 clone_dep https://github.com/pedronaugusto/mtldiffrast.git   mtldiffrast
-clone_dep https://github.com/pedronaugusto/mtlmesh.git       mtlmesh
+clone_dep_at https://github.com/pedronaugusto/mtlmesh.git   mtlmesh "$MTLMESH_COMMIT"
 clone_dep https://github.com/pedronaugusto/mtlgemm.git       mtlgemm
 clone_dep https://github.com/pedronaugusto/trellis2-apple.git trellis2-apple
 

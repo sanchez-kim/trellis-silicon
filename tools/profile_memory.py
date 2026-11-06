@@ -181,7 +181,12 @@ def make_func_wrapper(obj, attr, phase_name):
 
 
 def install_texture_bake_wrappers():
+    # Default Metal path: core.generate_glb imports trellis_silicon.postprocess
+    # .to_glb at call time, so wrapping the module attribute is enough.
+    from trellis_silicon import postprocess as tpp
+    make_func_wrapper(tpp, "to_glb", "texture_bake")
     try:
+        # Legacy path (GLB_REMESH=0) still calls the o_voxel fork's to_glb.
         import o_voxel.postprocess as ovp
         make_func_wrapper(ovp, "to_glb", "texture_bake")
     except (ImportError, AttributeError):

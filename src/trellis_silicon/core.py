@@ -12,6 +12,7 @@ import sys
 import os
 
 from . import _paths
+from .envflags import env_enabled
 
 # Set up backends before any TRELLIS imports. Use setdefault so the caller
 # can override from the environment. Default conv backend is flex_gemm since
@@ -250,52 +251,84 @@ def generate_glb(
         glb_path = f"{output_base}.glb"
         t_bake = time.time()
 
-        # Decimation cap before Metal BVH / xatlas. Default 200K keeps the Metal
-        # builder stable; raise via BAKE_MAX_FACES to let more geometry survive.
+        # Face budget of the exported GLB (to_glb's decimation_target). Raise via
+        # BAKE_MAX_FACES to let more geometry survive.
         bake_max_faces = int(os.environ.get("BAKE_MAX_FACES", "200000"))
+        # Default: the upstream TRELLIS.2 GLB postprocess (postprocess.to_glb —
+        # full-resolution decoder mesh in, narrow-band dual-contouring remesh,
+        # texels baked from the full-resolution surface, OPAQUE material).
+        # GLB_REMESH=0 restores the legacy path: fast_simplification pre-pass to
+        # the face budget, then the o_voxel fork's non-remesh cleanup branch
+        # (open boundaries, non-manifold edges and floaters survive into the GLB).
+        remesh = env_enabled("GLB_REMESH")
 
         if use_metal:
             try:
                 print(f"\nBaking PBR textures via Metal ({tex_size}x{tex_size})...")
                 import o_voxel
 
-                # Pre-simplify mesh to avoid mtlbvh crash on large meshes.
-                # Target ~200K faces — keeps detail, avoids Metal BVH issues.
-                import fast_simplification
+                # Keep all tensors on CPU — the Metal kernels read unified memory
+                # directly, and to_glb mixes the mesh with CPU-side AABB tensors.
+                if remesh:
+                    from .postprocess import to_glb
 
-                verts_np = mesh_out.vertices.cpu().numpy()
-                faces_np = mesh_out.faces.cpu().numpy()
-                target_faces = min(bake_max_faces, len(faces_np))
-                if len(faces_np) > target_faces:
-                    ratio = 1.0 - (target_faces / len(faces_np))
-                    print(f"  Simplifying mesh: {len(faces_np):,} -> ~{target_faces:,} faces")
-                    simp_verts, simp_faces = fast_simplification.simplify(verts_np, faces_np, ratio)
-                    simp_verts_t = torch.from_numpy(simp_verts).float().to(mesh_out.vertices.device)
-                    simp_faces_t = torch.from_numpy(simp_faces.astype("int32")).to(
-                        mesh_out.faces.device
+                    # Hand the decoder's cached MPS blocks back before the
+                    # remesh allocates (upstream empties the CUDA cache here).
+                    torch.mps.empty_cache()
+                    glb = to_glb(
+                        vertices=mesh_out.vertices.cpu(),
+                        faces=mesh_out.faces.cpu(),
+                        attr_volume=mesh_out.attrs.cpu(),
+                        coords=mesh_out.coords.cpu(),
+                        attr_layout=mesh_out.layout,
+                        voxel_size=mesh_out.voxel_size,
+                        aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
+                        decimation_target=bake_max_faces,
+                        texture_size=tex_size,
+                        remesh_band=1,
+                        remesh_project=0,
+                        verbose=True,
                     )
                 else:
-                    simp_verts_t = mesh_out.vertices
-                    simp_faces_t = mesh_out.faces
+                    # Legacy: pre-simplify so the fork's non-remesh branch (and
+                    # its BVH) only sees ~target_faces faces. The texture is then
+                    # baked from this simplified surface, not the decoder surface.
+                    import fast_simplification
 
-                # Move all mesh tensors to CPU — o_voxel.to_glb mixes device-neutral
-                # AABB tensor with mesh tensors; keep everything on CPU to avoid mismatch.
-                glb = o_voxel.postprocess.to_glb(
-                    vertices=simp_verts_t.cpu(),
-                    faces=simp_faces_t.cpu(),
-                    attr_volume=mesh_out.attrs.cpu(),
-                    coords=mesh_out.coords.cpu(),
-                    attr_layout=mesh_out.layout,
-                    voxel_size=mesh_out.voxel_size,
-                    aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
-                    decimation_target=target_faces,
-                    texture_size=tex_size,
-                    verbose=True,
-                )
+                    verts_np = mesh_out.vertices.cpu().numpy()
+                    faces_np = mesh_out.faces.cpu().numpy()
+                    target_faces = min(bake_max_faces, len(faces_np))
+                    bake_verts_t = mesh_out.vertices
+                    bake_faces_t = mesh_out.faces
+                    if len(faces_np) > target_faces:
+                        ratio = 1.0 - (target_faces / len(faces_np))
+                        print(f"  Simplifying mesh: {len(faces_np):,} -> ~{target_faces:,} faces")
+                        simp_verts, simp_faces = fast_simplification.simplify(
+                            verts_np, faces_np, ratio
+                        )
+                        bake_verts_t = torch.from_numpy(simp_verts).float()
+                        bake_faces_t = torch.from_numpy(simp_faces.astype("int32"))
+
+                    glb = o_voxel.postprocess.to_glb(
+                        vertices=bake_verts_t.cpu(),
+                        faces=bake_faces_t.cpu(),
+                        attr_volume=mesh_out.attrs.cpu(),
+                        coords=mesh_out.coords.cpu(),
+                        attr_layout=mesh_out.layout,
+                        voxel_size=mesh_out.voxel_size,
+                        aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
+                        decimation_target=target_faces,
+                        texture_size=tex_size,
+                        verbose=True,
+                    )
+                    # Upstream to_glb always writes OPAQUE. The fork switches to
+                    # BLEND when any texel has alpha < 250; viewers then disable
+                    # depth writes and back faces show through the model.
+                    glb.visual.material.alphaMode = "OPAQUE"
                 glb.export(glb_path)
                 print(f"  Saved: {glb_path}")
                 result["backend"] = "metal"
-            except RuntimeError as e:
+            except (RuntimeError, AssertionError) as e:
                 print(f"\n  Metal bake failed: {e}")
                 print("  Falling back to KDTree texture baker...")
                 use_metal = False
