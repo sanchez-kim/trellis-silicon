@@ -33,14 +33,18 @@ Any change that can affect generation must reproduce the deterministic
 baseline:
 
 - **seed 42 + `assets/brighella_input.png` + `512` pipeline → exactly
-  513,106 vertices / 1,071,104 triangles** (the `Mesh:` line, after the
+  513,120 vertices / 1,071,138 triangles** (the `Mesh:` line, after the
   decode-time hole fill and before the GLB export). The GLB face count is not
   part of the gate: the Metal QEM decimation varies by a few hundred faces
   between runs.
 
-The gate assumes the Metal toolchain is installed and decode-time hole fill is
-on (the default). With `DECODE_FILL_HOLES=0 GLB_REMESH=0` the same run
-reproduces 512,254 vertices / 1,065,930 triangles.
+The gate assumes the Metal toolchain is installed, sparse convolution runs on
+`flex_gemm` (the run log prints `[SPARSE] Conv backend: flex_gemm`; if
+`core.py` prints a "flex_gemm unavailable" line, re-run `setup.sh`), and
+decode-time hole fill is on (the default). With `SPARSE_CONV_BACKEND=none`
+the same run reproduces the previous baseline, 513,106 vertices / 1,071,104
+triangles; with `SPARSE_CONV_BACKEND=none DECODE_FILL_HOLES=0 GLB_REMESH=0`
+it reproduces 512,254 vertices / 1,065,930 triangles.
 
 Changes that only reorder floating-point ops (batching, kernel swaps) instead
 need to stay within ±1% of that baseline, with the GLB loading successfully
