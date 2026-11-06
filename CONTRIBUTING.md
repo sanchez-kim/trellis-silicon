@@ -68,9 +68,15 @@ must produce the same result both times).
 
 ## Dependencies
 
-Dependencies are locked in `requirements.lock`. Bumping a dependency requires
-re-running the verification gate above — dependency drift has been measured
-to shift the deterministic output mesh.
+Dependencies are locked in `requirements.lock`. Bumping a dependency or
+rebuilding the Metal packages requires re-running the verification gate above,
+and checking the `[SPARSE] Conv backend:` line in the log.
+A gate shift seen after a venv rebuild in July 2026 was first blamed on
+dependency drift. It was traced to `flex_gemm` silently failing to load, which
+switches sparse convolution to the `none` fallback and moves the mesh. All
+nine July 2026 run logs kept after the rebuild show `Conv backend: none`.
+Re-running with the July settings reproduces both July gate counts when only
+`SPARSE_CONV_BACKEND` changes.
 
 ## Pull requests
 
