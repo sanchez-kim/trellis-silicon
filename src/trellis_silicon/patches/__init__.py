@@ -28,7 +28,7 @@ from .loading import (
     patch_pipeline_conditional_load,
     patch_skip_init_on_load,
 )
-from .mesh import patch_fdg_vae, patch_mesh_base
+from .mesh import patch_fdg_vae, patch_mesh_base, patch_mesh_fill_holes
 from .stubs import install_conv_backend, install_mesh_extract
 
 __all__ = ["main"]
@@ -49,6 +49,7 @@ def main():
     patch_image_feature_extractor()
     patch_birefnet()
     patch_mesh_base()
+    patch_mesh_fill_holes()
     patch_fdg_vae()
     patch_pipeline()
     patch_pipeline_base()
