@@ -55,6 +55,13 @@ def main():
         help="Override sampler steps for all three flow phases (default: pipeline JSON, usually 12)",
     )
     parser.add_argument(
+        "--color-match",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Move the baked base colour toward the input photo's median brightness and "
+        "saturation (clamped, brighten-only). Off by default; TEXTURE_COLOR_MATCH=1 does the same, and the flag overrides it.",
+    )
+    parser.add_argument(
         "--resident",
         action="store_true",
         help="Keep all needed models resident on MPS for the whole run instead of "
@@ -95,6 +102,7 @@ def main():
             no_texture=args.no_texture,
             output_base=args.output,
             steps=args.steps,
+            color_match=args.color_match,
         )
     except WatchdogEmptyMeshError as e:
         # Empty mesh from the GPU watchdog: print the help text and exit 2,

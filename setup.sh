@@ -171,10 +171,9 @@ if [ "${SKIP_METAL:-0}" != "1" ]; then
     install_metal_dep mtlmesh     cumesh      || echo "  mtlmesh install failed — continuing without Metal mesh ops"
     # mtlgemm provides flex_gemm: the Metal sparse convolution for the SLat
     # decoders (SPARSE_CONV_BACKEND=flex_gemm, much faster than the pure-PyTorch
-    # conv_none fallback) and flex_gemm.ops.grid_sample, which the Metal baker in
-    # o_voxel.postprocess prefers over a torch.nn.functional.grid_sample
-    # fallback (cleaner texture baking, no concentric ring artifacts).
-    install_metal_dep mtlgemm     flex_gemm   || echo "  mtlgemm install failed — sparse conv and the baker fall back to slower pure-PyTorch paths"
+    # conv_none fallback) and flex_gemm.ops.grid_sample for the baker; without it
+    # the baker uses this port's CPU sparse_grid_sample_3d (same result, slower).
+    install_metal_dep mtlgemm     flex_gemm   || echo "  mtlgemm install failed — sparse conv falls back to pure PyTorch and the baker to the CPU sparse sampler (same result, slower)"
     # Pedro Naugusto's o_voxel CPU fork — exposes o_voxel.postprocess.to_glb
     # which wraps the Metal stack. Install last so its deps already present.
     install_metal_dep trellis2-apple/o-voxel o_voxel \

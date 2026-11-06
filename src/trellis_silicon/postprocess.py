@@ -32,6 +32,7 @@ the whole export, measured on this project's Mac).
 
 import contextlib
 import ctypes
+import warnings
 
 import numpy as np
 import torch
@@ -173,6 +174,179 @@ def make_bvh(vertices, faces, verbose=False):
     return _ChunkedBVH(vertices, faces)
 
 
+# Texels sampled per sparse_grid_sample_3d chunk (bounds the [chunk, 8] lookups).
+_SAMPLE_CHUNK = 1 << 20
+
+
+def sparse_grid_sample_3d(feats, coords, shape, grid, mode="trilinear"):
+    """Trilinear sample of a sparse voxel field with upstream flex_gemm semantics.
+
+    Same contract as ``o_voxel.postprocess._grid_sample_3d`` (feats [N, C],
+    coords [N, 4] as (batch, x, y, z), shape [B, C, X, Y, Z], grid [B, L, 3] in
+    voxel units) and returns [B*L, C] float32. Matches
+    ``flex_gemm/kernels/cuda/grid_sample/grid_sample.cu`` (what upstream
+    TRELLIS.2 bakes with on CUDA): voxel i covers [i, i+1) with its centre at
+    i + 0.5, only occupied voxels contribute, and their trilinear weights are
+    renormalised to sum to 1. A query with no occupied neighbour returns 0.
+
+    Used only when flex_gemm's grid_sample cannot be imported: the o_voxel
+    fork then falls back to a dense ``F.grid_sample`` over a zero-filled volume,
+    which counts empty voxels as black (the decoder's PBR field is a thin shell,
+    so most texels have empty neighbours), puts voxel i's centre at i instead of
+    i + 0.5, and needs a 6 x 512^3 float32 volume (3.2GB). On the fox input
+    that fallback baked the base colour ~24% darker (mean sampled alpha 0.77).
+
+    Inputs may live on any device: they move to the CPU first and the result
+    returns on ``grid``'s device. Empty ``feats`` or an empty query set give
+    zeros of the right shape.
+    """
+    if mode != "trilinear":
+        raise NotImplementedError(f"sparse_grid_sample_3d: mode={mode!r}")
+    out_device = grid.device
+    feats, coords, grid = feats.cpu(), coords.cpu(), grid.cpu()
+    B, dims = shape[0], torch.tensor(list(shape[2:5]), dtype=torch.long)
+    X, Y, Z = (int(d) for d in dims)
+    feats = feats.float()
+    coords = coords.long()
+    if feats.shape[0] == 0 or grid.numel() == 0:
+        return torch.zeros(B * grid.shape[1], feats.shape[1], dtype=torch.float32).to(out_device)
+    keys = ((coords[:, 0] * X + coords[:, 1]) * Y + coords[:, 2]) * Z + coords[:, 3]
+    keys, order = torch.sort(keys)
+    L = grid.shape[1]
+    q_all = grid.reshape(-1, 3).float()
+    b_all = torch.arange(B, dtype=torch.long).repeat_interleave(L)
+    offsets = torch.tensor(
+        [[i & 1, (i >> 1) & 1, (i >> 2) & 1] for i in range(8)], dtype=torch.long
+    )
+    out = torch.empty(q_all.shape[0], feats.shape[1], dtype=torch.float32)
+    for s in range(0, q_all.shape[0], _SAMPLE_CHUNK):
+        q = q_all[s : s + _SAMPLE_CHUNK]
+        b = b_all[s : s + _SAMPLE_CHUNK]
+        base = torch.floor(q - 0.5).long()
+        acc = torch.zeros(q.shape[0], feats.shape[1], dtype=torch.float32)
+        w_sum = torch.zeros(q.shape[0], dtype=torch.float32)
+        for off in offsets:
+            n = base + off
+            inside = ((n >= 0) & (n < dims)).all(dim=1)
+            k = ((b * X + n[:, 0]) * Y + n[:, 1]) * Z + n[:, 2]
+            pos = torch.searchsorted(keys, k).clamp_max(keys.shape[0] - 1)
+            found = inside & (keys[pos] == k)
+            w = (1 - (q - n - 0.5).abs()).prod(dim=1) * found
+            acc += w[:, None] * feats[order[pos]]
+            w_sum += w
+        out[s : s + _SAMPLE_CHUNK] = acc / w_sum.clamp_min(1e-12)[:, None]
+    return out.to(out_device)
+
+
+# --- Optional input-guided colour match (TEXTURE_COLOR_MATCH / --color-match) ---
+
+# Bounds on the correction. The input photo has its lighting baked in (shadows,
+# specular highlights), so a full match can over-correct; these cap how far the
+# albedo may move. The gain only brightens: TRELLIS.2's measured bias is a
+# darker albedo than the photo, and a photo darker than the albedo (shadowed
+# interiors) is not evidence that the albedo is too bright. Measured on four
+# inputs (fox, tin robot, backpack, egg chair; 512, seed 42): mean |dV|+|dS| of
+# the unlit input view vs the input 0.19 -> 0.07, the chair (already close) is
+# left as is (gain 1.0, chroma x0.98). A two-sided gain darkened the chair.
+COLOR_MATCH_MAX_GAIN = 2.0  # linear-light luminance gain, range [1, max]
+COLOR_MATCH_CHROMA_RANGE = (0.75, 1.25)  # Lab chroma scale
+# Input pixels with alpha below this are cutout edges mixed with background.
+_REF_MIN_ALPHA = 230
+# Fewer foreground pixels than this is no usable reference.
+_REF_MIN_PIXELS = 100
+
+
+def _srgb_to_linear(x):
+    return np.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4)
+
+
+def _linear_to_srgb(x):
+    x = np.clip(x, 0.0, 1.0)
+    return np.where(x <= 0.0031308, x * 12.92, 1.055 * x ** (1 / 2.4) - 0.055)
+
+
+def _luminance(lin):
+    return lin @ np.array([0.2126, 0.7152, 0.0722])
+
+
+def _lab(srgb):
+    import cv2
+
+    return cv2.cvtColor(srgb.astype(np.float32).reshape(-1, 1, 3), cv2.COLOR_RGB2Lab).reshape(-1, 3)
+
+
+def _weighted_median(x, w):
+    order = np.argsort(x)
+    cw = np.cumsum(w[order])
+    return float(x[order][np.searchsorted(cw, 0.5 * cw[-1])])
+
+
+def reference_pixels(rgba):
+    """Foreground pixels [N, 3] (sRGB, 0-1) of an RGBA input image."""
+    rgba = np.asarray(rgba)
+    if rgba.ndim != 3 or rgba.shape[2] != 4:
+        raise ValueError("colour reference must be an RGBA image")
+    px = rgba[..., :3][rgba[..., 3] >= _REF_MIN_ALPHA]
+    return px.astype(np.float64) / 255.0
+
+
+def color_match_params(ref_px, tex_px, tex_w=None):
+    """Gain and chroma scale that move the albedo texels toward the input
+    foreground, from medians (robust to highlights, shadows and small parts).
+
+    ref_px: input foreground pixels [N, 3] sRGB 0-1. tex_px: used texels
+    [M, 3] sRGB 0-1, tex_w: per-texel surface area (texel density varies per
+    chart). Returns (gain, chroma): gain multiplies linear RGB, chroma scales
+    Lab a/b after the gain. Both are clamped (COLOR_MATCH_*).
+    """
+    if len(ref_px) < _REF_MIN_PIXELS or len(tex_px) == 0:
+        warnings.warn(
+            f"colour match skipped: {len(ref_px)} reference foreground pixels "
+            f"(need {_REF_MIN_PIXELS}), {len(tex_px)} texels",
+            stacklevel=2,
+        )
+        return 1.0, 1.0
+    tex_w = np.ones(len(tex_px)) if tex_w is None else np.asarray(tex_w, np.float64)
+    ref_w = np.ones(len(ref_px))
+    y_ref = _weighted_median(_luminance(_srgb_to_linear(ref_px)), ref_w)
+    y_tex = _weighted_median(_luminance(_srgb_to_linear(tex_px)), tex_w)
+    gain = float(np.clip(y_ref / max(y_tex, 1e-6), 1.0, COLOR_MATCH_MAX_GAIN))
+    gained = _linear_to_srgb(_srgb_to_linear(tex_px) * gain)
+    c_ref = _weighted_median(np.hypot(*_lab(ref_px)[:, 1:].T), ref_w)
+    c_tex = _weighted_median(np.hypot(*_lab(gained)[:, 1:].T), tex_w)
+    chroma = float(np.clip(c_ref / max(c_tex, 1e-6), *COLOR_MATCH_CHROMA_RANGE))
+    return gain, chroma
+
+
+def texel_surface_weights(area3, texel_face):
+    """Per-texel surface area: each face's exact 3D area split evenly over the
+    texels it actually covers (a UV sliver covering one texel no longer
+    inflates its weight the way area3 / area_uv does).
+
+    area3: [F] 3D face areas. texel_face: [M] face index of every used texel.
+    Returns [M] weights.
+    """
+    cnt = torch.bincount(texel_face, minlength=area3.shape[0])
+    return (area3 / cnt.clamp_min(1))[texel_face]
+
+
+def apply_color_match(rgb, gain, chroma):
+    """Apply (gain, chroma) to uint8 sRGB pixels of any shape [..., 3].
+
+    A pixel whose gained linear max channel exceeds 1 is scaled by one factor
+    on all three channels, so clipping does not shift its hue.
+    """
+    import cv2
+
+    shape = rgb.shape
+    lin = _srgb_to_linear(rgb.reshape(-1, 3).astype(np.float64) / 255.0) * gain
+    lin = lin / np.maximum(lin.max(axis=1, keepdims=True), 1.0)
+    lab = _lab(_linear_to_srgb(lin))
+    lab[:, 1:] *= chroma
+    out = cv2.cvtColor(lab.reshape(-1, 1, 3), cv2.COLOR_Lab2RGB).reshape(-1, 3)
+    return (np.clip(out, 0, 1) * 255 + 0.5).astype(np.uint8).reshape(shape)
+
+
 def to_glb(
     vertices,
     faces,
@@ -189,6 +363,7 @@ def to_glb(
     mesh_cluster_refine_iterations=0,
     mesh_cluster_global_iterations=1,
     mesh_cluster_smooth_strength=1,
+    color_reference=None,
     verbose=False,
 ):
     """Upstream to_glb (remesh=True branch) on the Metal backends. All tensors
@@ -196,6 +371,11 @@ def to_glb(
 
     ``remesh_project=0`` follows upstream app.py; the upstream function
     signature default is 0.9.
+
+    ``color_reference`` (optional, not upstream): the input image as RGBA. When
+    given, the baked base colour is moved toward the input foreground's
+    median luminance and chroma (`color_match_params`), measured over the
+    texels that map to the surface, weighted by surface area.
     """
     import cumesh
     import cv2
@@ -302,6 +482,18 @@ def to_glb(
             rast_chunk[..., 3:4] += i
             rast = torch.where(mask_chunk, rast_chunk, rast)
         mask = rast[0, ..., 3] > 0
+        texel_weight = None
+        if color_reference is not None:
+            # Surface area each used texel stands for: chart texel density varies
+            try:
+                texel_face = rast[0, ..., 3][mask].long() - 1
+                tri3 = out_vertices[out_faces.long()]
+                area3 = torch.linalg.cross(tri3[:, 1] - tri3[:, 0], tri3[:, 2] - tri3[:, 0]).norm(
+                    dim=1
+                )
+                texel_weight = texel_surface_weights(area3, texel_face).double().cpu().numpy()
+            except Exception as e:
+                print(f"\n  Warning: colour match skipped: {e}")
 
         # 3D position of every texel, snapped to the hole-filled full-resolution
         # surface, so the bake samples the decoder surface, not the decimated one
@@ -326,6 +518,11 @@ def to_glb(
     if verbose:
         print("Finalizing mesh...", end="", flush=True)
     mask = mask.cpu().numpy()
+    # Texels whose sampled attrs are all zero had no occupied neighbour voxel;
+    # they stay in the texture but do not count in the colour statistics.
+    sampled = (
+        (attrs.abs().sum(dim=-1) > 0).cpu().numpy()[mask] if texel_weight is not None else None
+    )
 
     def channel(name):
         x = attrs[..., attr_layout[name]].cpu().numpy() * 255
@@ -335,6 +532,20 @@ def to_glb(
     metallic = channel("metallic")
     roughness = channel("roughness")
     alpha = channel("alpha")
+
+    if texel_weight is not None:
+        try:
+            tex = base_color[mask]
+            gain, chroma = color_match_params(
+                reference_pixels(color_reference), tex[sampled] / 255.0, texel_weight[sampled]
+            )
+            base_color[mask] = apply_color_match(tex, gain, chroma)
+            if verbose:
+                print(
+                    f" colour match: gain {gain:.3f}, chroma x{chroma:.3f} ...", end="", flush=True
+                )
+        except Exception as e:  # never let the optional match change or fail the bake
+            print(f"\n  Warning: colour match skipped: {e}")
 
     # Inpainting: fill gaps (dilation) to prevent black seams at UV boundaries
     mask_inv = (~mask).astype(np.uint8)

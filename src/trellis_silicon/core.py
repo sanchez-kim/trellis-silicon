@@ -71,6 +71,7 @@ sys.path.insert(0, _paths.trellis2_root())
 sys.path.append(_paths.stubs_dir())
 
 import time
+import numpy as np
 from PIL import Image as PILImage
 
 
@@ -144,10 +145,44 @@ def load_pipeline(pipeline_type, resident=False):
     return pipeline
 
 
+def color_reference(pipeline, image):
+    """RGBA foreground of the input image for the optional colour match: the
+    image's own alpha when it has one, else the pipeline's background remover
+    (the same model and call preprocess_image uses). Runs after generation,
+    so it cannot change the geometry."""
+    rgba = image.convert("RGBA")
+    if image.mode == "RGBA" and rgba.getextrema()[3][0] < 255:
+        return rgba
+    scale = min(1, 1024 / max(image.size))  # preprocess_image's input cap
+    if scale < 1:
+        size = (int(image.width * scale), int(image.height * scale))
+        image = image.resize(size, PILImage.Resampling.LANCZOS)
+    if pipeline.low_vram:
+        pipeline.rembg_model.to(pipeline.device)
+    try:
+        return pipeline.rembg_model(image.convert("RGB")).convert("RGBA")
+    finally:
+        if pipeline.low_vram:
+            pipeline.rembg_model.cpu()
+
+
 def generate_glb(
-    pipeline, image, *, seed, pipeline_type, texture_size, no_texture=False, output_base, steps=None
+    pipeline,
+    image,
+    *,
+    seed,
+    pipeline_type,
+    texture_size,
+    no_texture=False,
+    output_base,
+    steps=None,
+    color_match=None,
 ):
     """Run the pipeline and bake a textured GLB. Shared by CLI and UI.
+
+    color_match: move the baked base colour toward the input foreground
+    (postprocess.color_match_params). None reads TEXTURE_COLOR_MATCH (default
+    off). Only the default remesh bake supports it.
 
     Returns a dict with the output paths and stats:
         glb_path, basecolor_path (or None), verts, faces (numpy arrays for
@@ -213,43 +248,13 @@ def generate_glb(
             has_dr = getattr(o_voxel.postprocess, "_HAS_DR", False)
             use_metal = backend == "metal" and has_dr
             if use_metal and not getattr(o_voxel.postprocess, "_HAS_FLEX_GEMM", False):
-                # o_voxel's _grid_sample_3d fallback returns [B*C, M] but the
-                # bake consumes it as [M, C]. Patch it to transpose before the
-                # reshape. This branch only runs when flex_gemm is missing; an
-                # older note here claimed importing flex_gemm slows diffusion
-                # ~10x on MPS, but per-step sampling rates measure the same
-                # with flex_gemm imported at startup (2026-11-06).
-                import torch.nn.functional as _F_gs
+                # Without flex_gemm's grid_sample the fork falls back to a
+                # dense F.grid_sample whose output layout the bake can't use
+                # and which darkens the texture. Swap in a sampler with the
+                # upstream flex_gemm semantics (postprocess.sparse_grid_sample_3d).
+                from . import postprocess as _pp
 
-                def _gs3d_fix(feats, coords, shape, grid, mode="trilinear"):
-                    B, C = shape[0], shape[1]
-                    D, H, W = shape[2], shape[3], shape[4]
-                    device = feats.device
-                    dense_vol = torch.zeros(B, C, D, H, W, dtype=feats.dtype, device=device)
-                    batch_idx = coords[:, 0].long()
-                    cx = coords[:, 1].long()
-                    cy = coords[:, 2].long()
-                    cz = coords[:, 3].long()
-                    dense_vol[batch_idx, :, cx, cy, cz] = feats
-                    grid_norm = torch.stack(
-                        [
-                            grid[..., 2] / (W - 1) * 2 - 1,
-                            grid[..., 1] / (H - 1) * 2 - 1,
-                            grid[..., 0] / (D - 1) * 2 - 1,
-                        ],
-                        dim=-1,
-                    ).reshape(B, 1, 1, -1, 3)
-                    sampled = _F_gs.grid_sample(
-                        dense_vol,
-                        grid_norm,
-                        mode="bilinear",
-                        align_corners=True,
-                        padding_mode="border",
-                    )
-                    M = grid.shape[1]
-                    return sampled.reshape(B, C, M).permute(0, 2, 1).reshape(B * M, C)
-
-                o_voxel.postprocess._grid_sample_3d = _gs3d_fix
+                o_voxel.postprocess._grid_sample_3d = _pp.sparse_grid_sample_3d
         except (ImportError, AttributeError):
             use_metal = False
 
@@ -266,6 +271,20 @@ def generate_glb(
         # the face budget, then the o_voxel fork's non-remesh cleanup branch
         # (open boundaries, non-manifold edges and floaters survive into the GLB).
         remesh = env_enabled("GLB_REMESH")
+        if color_match is None:
+            color_match = env_enabled("TEXTURE_COLOR_MATCH", default=False)
+        if color_match and not (use_metal and remesh):
+            print("\n  Colour match needs the default remesh bake; skipped.")
+            color_match = False
+
+        # Computed outside the bake try and before the MPS cache is emptied:
+        # a failure here skips the match, never the Metal bake or the run.
+        ref = None
+        if color_match:
+            try:
+                ref = np.asarray(color_reference(pipeline, image))
+            except Exception as e:
+                print(f"\n  Warning: colour match skipped: {e}")
 
         if use_metal:
             try:
@@ -292,6 +311,7 @@ def generate_glb(
                         texture_size=tex_size,
                         remesh_band=1,
                         remesh_project=0,
+                        color_reference=ref,
                         verbose=True,
                     )
                 else:
@@ -340,6 +360,8 @@ def generate_glb(
 
         if not use_metal:
             print(f"\nBaking PBR textures via KDTree ({tex_size}x{tex_size})...")
+            if color_match:
+                print("  Colour match skipped: the KDTree baker does not support it.")
             from .backends.texture_baker import uv_unwrap, bake_texture, export_glb_with_texture
 
             voxel_coords = mesh_out.coords.cpu().float()
