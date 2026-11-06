@@ -155,6 +155,12 @@ class Renderer:
         m = np.eye(4, dtype=np.float32)
         m[:3, :3] = self.scale * ry
         m[:3, 3] = -self.scale * (ry @ self.center)
+        # Identity projection + GL's LESS depth test keeps the fragment with the
+        # smallest NDC z, so without this flip the camera effectively sat at -z
+        # while x stayed to the right: every frame came out mirrored. Negating z
+        # puts the camera at +z (glTF front), which the shader's normal flip and
+        # the light directions already assume.
+        m[2, :] *= -1.0
         return m, ry
 
     def render(self, deg):
