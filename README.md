@@ -105,6 +105,12 @@ SKIP_METAL=1 bash setup.sh
 rm -rf deps && bash setup.sh
 ```
 
+**Upgrading.** `mtlbvh` and `mtlmesh` are pinned to exact commits. If an existing `deps/mtlbvh` or `deps/mtlmesh` is at a different commit, `setup.sh` stops with an error. Rebuild them with the same command:
+
+```bash
+rm -rf deps && bash setup.sh
+```
+
 ## Usage
 
 ```bash
@@ -126,7 +132,7 @@ trellis-silicon --help
 | `--texture-size` | `1024` | PBR texture resolution: `512`, `1024`, `2048` |
 | `--steps N` | pipeline JSON (usually 12) | Override sampler steps for all three flow phases |
 | `--no-texture` | — | Skip texture baking (still exports geometry) |
-| `--obj` | — | Also export the untextured, full-resolution OBJ (written before simplification) |
+| `--obj` | — | Also export the untextured, full-resolution decoder mesh as OBJ (hole-filled, before remesh/decimation) |
 | `--resident` | — | Keep all models resident on MPS instead of shuffling CPU↔MPS per phase. Measured slower on a 24-32GB machine (memory pressure outweighs the saved transfers); may help on 64GB+ |
 
 A GLB with baked PBR textures is the only default output; use `--obj` if you also need the untextured full-resolution mesh.
@@ -156,25 +162,22 @@ trellis-silicon photo.png --pipeline-type 1024_cascade --texture-size 2048
 <img src="assets/quality_compare.png" width="720" alt="512 default output next to 1024_cascade with 2K textures">
 </p>
 
-At default settings the GLB-level gain is mostly texture fidelity, because every mesh is decimated to 200K faces before baking. That cap is configurable:
+At default settings the GLB-level gain is mostly texture fidelity, because every GLB is decimated to a 200K-face budget (the texture is still baked from the full-resolution surface). That budget is configurable:
 
 ```bash
-# let up to 800K faces survive into the GLB (measured stable, bake +~50-90s)
+# let up to 800K faces survive into the GLB
 BAKE_MAX_FACES=800000 trellis-silicon photo.png --pipeline-type 1024_cascade --texture-size 2048
 ```
 
-Measured on one M-series/32GB machine (512-pipeline input, 1.06M raw faces): stable at every cap tried — 400K (bake 22s), 600K (30s), 800K (91s), even the full undecimated 1.06M mesh (120s), vs 9s at the default 200K. For `1024_cascade` the difference is dramatic: with `BAKE_MAX_FACES=800000`, 730K faces survive into the GLB instead of 164K — visibly cleaner drapery and far fewer surface pits:
+Measured on one M-series/32GB machine with the earlier export path (pre-simplify, no remesh; 512-pipeline input, 1.06M raw faces): stable at every cap tried — 400K (bake 22s), 600K (30s), 800K (91s), even the full undecimated 1.06M mesh (120s), vs 9s at the default 200K. For `1024_cascade` the difference is dramatic: with `BAKE_MAX_FACES=800000`, 730K faces survive into the GLB instead of 164K — visibly cleaner drapery and far fewer surface pits:
 
 <p>
 <img src="assets/bakecap_compare.png" width="720" alt="1024_cascade baked at the default 200K face cap next to the same generation baked at an 800K cap">
 </p>
 
-The default stays a conservative 200K until higher caps are validated on more machines (the historical "unstable above 800K" behavior of the Metal BVH builder did not reproduce here, but the evidence is one machine, single runs).
+The default stays a conservative 200K until higher caps are validated on more machines with the current export path. Upstream's GitHub app defaults to 500K.
 
-Beyond that, two things still cap quality relative to the CUDA original:
-
-- **Hole filling disabled.** Decode-time hole filling needs `cumesh`, whose Metal port crashes on decoder-sized meshes; outputs may have small holes the CUDA path would close.
-- **Pre-bake decimation at default settings** — see above; `--obj` exports the full-resolution mesh regardless.
+The export itself follows upstream TRELLIS.2: hole fill, a closed narrow-band dual-contouring remesh, decimation, and a bake snapped to the full-resolution surface (see [Technical details](#technical-details)).
 
 ### Web UI
 
@@ -208,7 +211,8 @@ TRELLIS.2 depends on several CUDA-only libraries. Each is replaced with a backen
 | `flex_gemm` | `mtlgemm` (Pedro Naugusto's Metal port), with `backends/conv_none.py` fallback | Sparse 3D convolution |
 | `o_voxel._C` hashmap | `backends/mesh_extract.py` | Mesh extraction from the dual voxel grid (pure PyTorch) |
 | `flash_attn` | PyTorch SDPA (sparse path) / naive unfused (dense path) | Attention; the unfused dense path is a measured 3.3-3.9× win over MPS SDPA |
-| `cumesh` | Skipped during decode | Crashes the Metal port on decoder-sized meshes; replaced by `fast_simplification` before baking |
+| `cumesh` | `mtlmesh` (Pedro Naugusto's Metal port) | Decode-time hole filling, narrow-band dual-contouring remesh, QEM decimation, UV unwrap |
+| `cumesh.cuBVH` | `mtlbvh` (Metal) | Closest-point queries for the remesh distance field and the texture bake |
 | `nvdiffrast` | `mtldiffrast` (Metal), with pure-Python fallback | Differentiable rasterization for texture baking |
 
 All hardcoded `.cuda()` calls are patched to use the active device.
@@ -221,7 +225,7 @@ All hardcoded `.cuda()` calls are patched to use the active device.
 
 **Attention** (patched `full_attn.py`): adds an SDPA backend to the sparse attention module. Variable-length sequences are padded into a batch, run through `torch.nn.functional.scaled_dot_product_attention`, then unpadded.
 
-**Texture baking**: by default the Metal stack from [@pedronaugusto](https://github.com/pedronaugusto) — [`mtldiffrast`](https://github.com/pedronaugusto/mtldiffrast), [`mtlbvh`](https://github.com/pedronaugusto/mtlbvh), [`mtlmesh`](https://github.com/pedronaugusto/mtlmesh), and his CPU fork of [`o_voxel`](https://github.com/pedronaugusto/trellis2-apple) — exposing `o_voxel.postprocess.to_glb`. The decoder mesh is pre-simplified to ~200K faces with `fast_simplification` before the Metal BVH (the builder is unstable on 800K+ face inputs). Without the Metal toolchain, `backends/texture_baker.py` takes over: xatlas UV unwrap, then a scipy cKDTree + inverse-distance weighting over the sparse voxel grid.
+**GLB export** (`postprocess.py`): a port of the upstream TRELLIS.2 `to_glb` production path (`remesh=True`, as upstream `app.py` calls it), running on the Metal stack from [@pedronaugusto](https://github.com/pedronaugusto) — [`mtldiffrast`](https://github.com/pedronaugusto/mtldiffrast), [`mtlbvh`](https://github.com/pedronaugusto/mtlbvh), [`mtlmesh`](https://github.com/pedronaugusto/mtlmesh), plus helpers from his CPU fork of [`o_voxel`](https://github.com/pedronaugusto/trellis2-apple). The full-resolution decoder mesh is hole-filled, rebuilt as a closed surface by narrow-band dual contouring at the pipeline resolution, decimated to the face budget (`BAKE_MAX_FACES`, default 200K), UV-unwrapped, and textured by snapping every texel back to the full-resolution surface before sampling the voxel PBR volume. The material is `OPAQUE` and single-sided, as upstream. We do not call the fork's own `to_glb`: it adds a cleanup pass after the remesh that re-opens holes, and it switches the material to `BLEND` (see-through in three.js viewers) when any texel has alpha < 250. `mtlbvh` builds older than [bc0a534](https://github.com/pedronaugusto/mtlbvh/commit/bc0a534) miss the nearest triangle on meshes above ~131K triangles (a 24-slot traversal stack overflows); `setup.sh` pins a fixed commit, and `postprocess.make_bvh` detects an old build with a self-test and falls back to exact sub-BVHs. `GLB_REMESH=0` restores the earlier path (`fast_simplification` to the face budget, then the fork's non-remesh branch), which leaves open boundaries in the GLB. That legacy path needs a fixed `mtlbvh` (pin `fe6660b`): the sub-BVH fallback only protects the default path. Without the Metal toolchain, `backends/texture_baker.py` takes over: xatlas UV unwrap, then a scipy cKDTree + inverse-distance weighting over the sparse voxel grid (no remesh).
 
 ## Performance
 
@@ -247,7 +251,8 @@ Phase-level profiling (`tools/profile_memory.py`, one M-series/32GB machine, `51
 |---|---|
 | **Pipeline load** | **~12-14GB (the actual peak)** |
 | Structure/shape/tex sampling | well under 1GB above baseline |
-| Decode + texture bake | ~3GB |
+| Decode | ~1-2GB |
+| GLB export (hole fill + remesh + decimate + bake) | ~4.5GB on the Brighella sample (a standalone export of 2.4M-5.3M-face decoder meshes peaks at 9-11GB memory footprint) |
 
 The peak occurs during **loading**, not during sampling or baking — checkpoint construction and dtype casting transiently need more memory than the pipeline settles into afterward. This also means process RSS (what actually determines whether a machine can run this at all) and PyTorch's MPS-only counters (`driver_allocated_memory`) disagree substantially: the MPS-only view puts the peak at ~9.4GB during texture baking, missing the larger, CPU-side loading spike entirely — because `low_vram` mode keeps not-yet-active submodels resident on the CPU side, and on unified memory that counts against the same budget even though it never touches the MPS device counters. If you're profiling this pipeline yourself, measure process RSS, not just MPS allocator stats.
 
@@ -259,9 +264,10 @@ The first-ever run also downloads ~15GB of HuggingFace weights (TRELLIS.2, DINOv
 
 ## Limitations
 
-- **Hole filling disabled.** Decode-time hole filling needs `cumesh`, whose Metal port segfaults on decoder-sized meshes, so it is skipped. Output meshes may have small holes.
 - **Attention is not fused.** Dense (structure-phase) attention runs through a naive unfused implementation — measured 3.3-3.9× *faster* than PyTorch's fused MPS SDPA at these shapes — and sparse attention through padded SDPA. Roofline analysis bounds what a hand-written flash-style Metal kernel could add on top at ~6% end-to-end, which we judged not worth the engineering cost. A fused *varlen/sparse* kernel would not help at all: single-image inference is batch-1 with zero padding waste.
-- **Pre-simplified before bake.** By default the mesh is decimated to ~200K faces before Metal BVH construction. Raise the cap with `BAKE_MAX_FACES` (see [Maximum quality](#maximum-quality)) or pass `--obj` for the full-resolution mesh (written before simplification).
+- **GLB face budget.** The GLB is decimated to 200K faces by default (upstream's GitHub app defaults to 500K). Raise it with `BAKE_MAX_FACES` (see [Maximum quality](#maximum-quality)) or pass `--obj` for the full-resolution decoder mesh.
+- **No remesh without the Metal toolchain.** The KDTree fallback baker (`SKIP_METAL=1`) skips the upstream remesh, so its GLBs keep the decoder mesh's open boundaries. With `SKIP_METAL=1` the decode-time hole fill is also off.
+- **Switches.** `DECODE_FILL_HOLES=0` skips the decode-time hole fill. `GLB_REMESH=0` selects the legacy GLB path. Both accept `0`, `false`, `no` or `off` (case-insensitive) as off.
 - **Inference only.** No training support.
 
 ## Development
