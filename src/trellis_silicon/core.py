@@ -17,9 +17,9 @@ from .envflags import env_enabled
 # Set up backends before any TRELLIS imports. Use setdefault so the caller
 # can override from the environment. Default conv backend is flex_gemm since
 # Pedro Naugusto's mtlgemm fix (zero-copy on MPS, fp16/bf16 native); fall
-# back to conv_none if flex_gemm isn't importable for some reason.
-# MPS fallback MUST be set before torch is imported anywhere (including
-# transitively via flex_gemm). Without this, segment_reduce and a few other
+# back to conv_none if flex_gemm isn't importable (see convbackend.py).
+# MPS fallback MUST be set before torch is imported anywhere (torch is
+# imported below, right after these defaults). Without this, segment_reduce and a few other
 # ops crash instead of falling back to CPU.
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
@@ -45,17 +45,21 @@ os.environ.setdefault("ATTN_BACKEND", "naive")
 # 'naive' branch to the sparse dispatch (previously it aliased 'sdpa').
 # Escape hatch: SPARSE_ATTN_BACKEND=sdpa restores the fused path.
 os.environ.setdefault("SPARSE_ATTN_BACKEND", "naive")
-try:
-    import flex_gemm  # noqa: F401
 
-    os.environ.setdefault("SPARSE_CONV_BACKEND", "flex_gemm")
-except (ImportError, RuntimeError):
-    # ImportError: package not installed (SKIP_METAL=1 or install failed).
-    # RuntimeError: metallib load failure — flex_gemm ships an MSL 4.0
-    # metallib which only loads on macOS 26+. On older macOS the import
-    # itself raises "Failed to load metallib ... language version 4.0
-    # which is not supported on this OS". Fall back to conv_none either way.
-    os.environ.setdefault("SPARSE_CONV_BACKEND", "none")
+# torch is imported here, after the env defaults above and before flex_gemm.
+# flex_gemm's _C extension links @rpath/libc10.dylib, and mtlgemm's setup.py
+# bakes the build venv's absolute torch/lib path in as its only torch rpath.
+# Imported first, a build whose venv has moved (e.g. trellis-mac ->
+# trellis-silicon) fails to load, and the old code then fell back to the slow
+# conv_none backend without a word. With torch loaded, libc10 is already in the
+# process and the extension resolves it whatever its rpath says.
+import torch
+
+from .convbackend import select_sparse_conv_backend
+
+# Escape hatch: SPARSE_CONV_BACKEND=none (or any explicit value) skips the
+# probe. If flex_gemm cannot be imported, one line on stderr says so and why.
+select_sparse_conv_backend()
 
 # Add paths. stubs/ is appended (not prepended) so a pip-installed o_voxel
 # wins over our package stub — the flat override module o_voxel_override_convert
@@ -67,7 +71,6 @@ sys.path.insert(0, _paths.trellis2_root())
 sys.path.append(_paths.stubs_dir())
 
 import time
-import torch
 from PIL import Image as PILImage
 
 
@@ -212,8 +215,10 @@ def generate_glb(
             if use_metal and not getattr(o_voxel.postprocess, "_HAS_FLEX_GEMM", False):
                 # o_voxel's _grid_sample_3d fallback returns [B*C, M] but the
                 # bake consumes it as [M, C]. Patch it to transpose before the
-                # reshape. We avoid installing flex_gemm itself because its
-                # import slows the diffusion hot path ~10x on MPS.
+                # reshape. This branch only runs when flex_gemm is missing; an
+                # older note here claimed importing flex_gemm slows diffusion
+                # ~10x on MPS, but per-step sampling rates measure the same
+                # with flex_gemm imported at startup (2026-11-06).
                 import torch.nn.functional as _F_gs
 
                 def _gs3d_fix(feats, coords, shape, grid, mode="trilinear"):

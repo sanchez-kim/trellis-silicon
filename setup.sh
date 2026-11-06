@@ -116,7 +116,7 @@ echo "Installing dependencies..."
 if command -v uv &>/dev/null; then
     PIP="uv pip install"
 else
-    PIP="pip install"
+    PIP="python3 -m pip install"
 fi
 # Install the locked dependency set first (the exact versions the verification
 # gate baseline was established with — see requirements.lock), then the package
@@ -125,6 +125,8 @@ fi
 $PIP -r requirements.lock
 $PIP -e . --no-deps
 $PIP "$DEPS_DIR/utils3d"
+
+METAL_FAILS=""
 
 # Optional Metal acceleration for texture baking.
 # Requires Xcode Metal Toolchain:
@@ -140,21 +142,59 @@ if [ "${SKIP_METAL:-0}" != "1" ]; then
     export MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-12.0}
     echo
     echo "Installing Metal backends for texture baking (set SKIP_METAL=1 to skip)..."
-    PIP_NB="$PIP --no-build-isolation"
     # Build deps required by the Metal packages' setup.py
     $PIP setuptools wheel pybind11
-    $PIP_NB "$DEPS_DIR/mtlbvh"      || echo "  mtlbvh install failed — continuing without Metal BVH"
-    $PIP_NB "$DEPS_DIR/mtldiffrast" || echo "  mtldiffrast install failed — continuing without Metal rasterizer"
-    $PIP_NB "$DEPS_DIR/mtlmesh"     || echo "  mtlmesh install failed — continuing without Metal mesh ops"
-    # mtlgemm provides flex_gemm.ops.grid_sample. The Metal baker in
-    # o_voxel.postprocess prefers this over a torch.nn.functional.grid_sample
-    # fallback, and the flex_gemm sparse sampling produces noticeably cleaner
-    # texture baking (no concentric ring artifacts on curved surfaces).
-    $PIP_NB "$DEPS_DIR/mtlgemm"     || echo "  mtlgemm install failed — baker will use a lower-quality torch.nn.functional.grid_sample fallback"
+
+    # Always compile the Metal packages against THIS venv's torch.
+    # setuptools' build_ext skips the compile when deps/<pkg>/build/ already
+    # holds an extension newer than its sources, and packs that old binary
+    # into the new wheel (verified here); uv may also reuse a cached wheel for an unchanged
+    # source dir. mtlgemm's setup.py bakes the build venv's absolute
+    # torch/lib path into flex_gemm's _C as its only torch rpath, so a binary
+    # left over from a venv at another path (the trellis-mac -> trellis-silicon
+    # rename) cannot load libc10 on its own — and a re-run of this script
+    # silently reinstalled exactly that binary. Removing build/ and forcing a
+    # reinstall (which refreshes uv's cache entry) makes every run compile.
+    install_metal_dep() {
+        local dir="$1" dist="$2"
+        rm -rf "$DEPS_DIR/$dir/build"
+        if command -v uv &>/dev/null; then
+            uv pip install --no-build-isolation --reinstall-package "$dist" "$DEPS_DIR/$dir"
+        else
+            # pip always rebuilds and reinstalls a local path source.
+            python3 -m pip install --no-build-isolation "$DEPS_DIR/$dir"
+        fi
+    }
+
+    install_metal_dep mtlbvh      mtlbvh      || echo "  mtlbvh install failed — continuing without Metal BVH"
+    install_metal_dep mtldiffrast mtldiffrast || echo "  mtldiffrast install failed — continuing without Metal rasterizer"
+    install_metal_dep mtlmesh     cumesh      || echo "  mtlmesh install failed — continuing without Metal mesh ops"
+    # mtlgemm provides flex_gemm: the Metal sparse convolution for the SLat
+    # decoders (SPARSE_CONV_BACKEND=flex_gemm, much faster than the pure-PyTorch
+    # conv_none fallback) and flex_gemm.ops.grid_sample, which the Metal baker in
+    # o_voxel.postprocess prefers over a torch.nn.functional.grid_sample
+    # fallback (cleaner texture baking, no concentric ring artifacts).
+    install_metal_dep mtlgemm     flex_gemm   || echo "  mtlgemm install failed — sparse conv and the baker fall back to slower pure-PyTorch paths"
     # Pedro Naugusto's o_voxel CPU fork — exposes o_voxel.postprocess.to_glb
     # which wraps the Metal stack. Install last so its deps already present.
-    $PIP_NB "$DEPS_DIR/trellis2-apple/o-voxel" \
+    install_metal_dep trellis2-apple/o-voxel o_voxel \
         || echo "  o_voxel (Apple fork) install failed — falling back to KDTree baker"
+
+    # Load check: import each package after torch, as trellis_silicon.core does.
+    SMOKE_OUT=$(python3 - <<'PY' || true
+import importlib
+import torch  # noqa: F401  (loads libc10 & co. before the extensions)
+for name in ("mtlbvh", "mtldiffrast", "cumesh", "flex_gemm", "o_voxel"):
+    try:
+        importlib.import_module(name)
+        print(f"  {name}: OK")
+    except Exception as exc:  # report and keep going; setup.sh treats these as optional
+        first = (str(exc).splitlines() or [""])[0][:160]
+        print(f"  {name}: NOT available ({type(exc).__name__}: {first})")
+PY
+)
+    echo "$SMOKE_OUT"
+    METAL_FAILS=$(printf '%s\n' "$SMOKE_OUT" | grep 'NOT available' | sed 's/^ *//' || true)
 fi
 
 # Apply source patches (this also installs stubs and backends)
@@ -173,6 +213,16 @@ else
     echo "You also need to request access to these gated models:"
     echo "  https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m"
     echo "  https://huggingface.co/briaai/RMBG-2.0"
+fi
+
+if [ -n "$METAL_FAILS" ]; then
+    echo
+    echo "WARNING: Metal packages not available:"
+    printf '%s\n' "$METAL_FAILS" | sed 's/^/  /'
+    if [ "${STRICT_METAL:-0}" = "1" ]; then
+        echo "STRICT_METAL=1: failing."
+        exit 1
+    fi
 fi
 
 echo

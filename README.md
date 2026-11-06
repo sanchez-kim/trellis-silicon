@@ -11,8 +11,8 @@ TRELLIS.2 is Microsoft Research's state-of-the-art image-to-3D model. It ships C
 ## TL;DR
 
 - **One command**: `trellis-silicon photo.png` → GLB with baked PBR textures. Web UI: `trellis-silicon-web`.
-- **Fast**: warm runs take **~19s load + ~2.5-3 min generation** (default `512` pipeline). The performance pass over the base port cut load **5×** (~103s → ~19s) and total warm time **~37%** (~300s → ~190s); `--steps 8` fast mode lands near ~140s with almost no visible quality loss.
-- **Where the speed came from** (measured, not guessed): skipping a weight init that gets overwritten anyway, loading only the checkpoints the pipeline uses, batching the two CFG forwards, swapping MPS SDPA for a naive attention that is 3.3-3.9× faster at these shapes, and vectorizing mesh extraction (67×). Full story in [Performance](#performance) — including five intuitive optimizations that measurement killed.
+- **Fast**: warm runs take **~20s load + ~1.6-1.7 min generation + ~23s GLB export** (default `512` pipeline, ~2.4 min wall). The performance pass over the base port cut load **5×** (~103s → ~19s) and total warm time **~37%** (~300s → ~190s); `--steps 8` fast mode cuts generation time further with little visible quality loss.
+- **Where the speed came from** (measured, not guessed): skipping a weight init that gets overwritten anyway, loading only the checkpoints the pipeline uses, batching the two CFG forwards, swapping MPS SDPA for a naive attention that is 3.3-4.1× faster at these shapes, running sparse convolution on the Metal `flex_gemm` kernels, and vectorizing mesh extraction (67×). Full story in [Performance](#performance) — including five intuitive optimizations that measurement killed.
 - **Quality is tunable**: defaults favor speed; `--pipeline-type 1024_cascade --texture-size 2048` plus `BAKE_MAX_FACES=800000` for maximum quality (see [Maximum quality](#maximum-quality)).
 - **Reproducible**: pinned upstream commit, locked dependencies, deterministic verification gate, tests + CI on Apple Silicon runners.
 
@@ -63,7 +63,7 @@ From a single image, TRELLIS-Silicon generates a **400K+ vertex mesh with baked 
 
 - macOS on Apple Silicon (M1 or later)
 - Python 3.11+
-- 24GB+ unified memory recommended (the 4B model is large); measured peak process memory on one machine (512 pipeline, default settings) was ~12-14GB, occurring during pipeline load rather than generation or baking — see [Memory](#memory) below if you're on a 16GB machine
+- 24GB+ unified memory recommended (the 4B model is large); measured peak memory footprint on one machine was ~18.5GB for the default `512` pipeline and ~23.5GB for `1024_cascade` (`/usr/bin/time -l`) — see [Memory](#memory) below
 - ~15GB disk space for model weights (downloaded on first run)
 
 ## Installation
@@ -104,6 +104,8 @@ SKIP_METAL=1 bash setup.sh
 ```bash
 rm -rf deps && bash setup.sh
 ```
+
+Each `setup.sh` run recompiles the Metal packages from a clean `build/` directory (about 85 s on an M5), then prints an `OK` / `NOT available` line for each one. If a run prints `[trellis-silicon] flex_gemm unavailable (...)`, sparse convolution is on the slow pure-PyTorch fallback: re-run `bash setup.sh`.
 
 **Upgrading.** `mtlbvh` and `mtlmesh` are pinned to exact commits. If an existing `deps/mtlbvh` or `deps/mtlmesh` is at a different commit, `setup.sh` stops with an error. Rebuild them with the same command:
 
@@ -156,7 +158,9 @@ trellis-silicon photo.png --pipeline-type 1024_cascade --texture-size 2048
 | | `512` (default) | `1024` | `1024_cascade` |
 |---|---|---|---|
 | Raw mesh | ~1.0M triangles | ~4.0M | ~4.2M |
-| Wall time (warm machine, single indicative runs) | ~3.5 min | ~17 min | ~19 min |
+| Wall time (warm machine, single indicative runs) | ~2.4 min | ~17 min* | ~7.7 min |
+
+\* `512` and `1024_cascade` were re-measured on 2026-11-06 (M5/32GB, `flex_gemm` sparse conv, `/usr/bin/time`); the `1024` figure is an older measurement, taken before the naive-attention and `flex_gemm` changes, so it overstates today's time.
 
 <p>
 <img src="assets/quality_compare.png" width="720" alt="512 default output next to 1024_cascade with 2K textures">
@@ -208,9 +212,9 @@ TRELLIS.2 depends on several CUDA-only libraries. Each is replaced with a backen
 
 | Original (CUDA) | Replacement | Purpose |
 |---|---|---|
-| `flex_gemm` | `mtlgemm` (Pedro Naugusto's Metal port), with `backends/conv_none.py` fallback | Sparse 3D convolution |
+| `flex_gemm` | `mtlgemm` (Pedro Naugusto's Metal port; default), with `backends/conv_none.py` as the pure-PyTorch fallback | Sparse 3D convolution in the shape/texture SLat decoders |
 | `o_voxel._C` hashmap | `backends/mesh_extract.py` | Mesh extraction from the dual voxel grid (pure PyTorch) |
-| `flash_attn` | PyTorch SDPA (sparse path) / naive unfused (dense path) | Attention; the unfused dense path is a measured 3.3-3.9× win over MPS SDPA |
+| `flash_attn` | naive unfused attention (dense and sparse paths; `ATTN_BACKEND=sdpa` / `SPARSE_ATTN_BACKEND=sdpa` restore PyTorch SDPA) | Attention; the unfused path is a measured 3.3-4.1× win over MPS SDPA at these shapes |
 | `cumesh` | `mtlmesh` (Pedro Naugusto's Metal port) | Decode-time hole filling, narrow-band dual-contouring remesh, QEM decimation, UV unwrap |
 | `cumesh.cuBVH` | `mtlbvh` (Metal) | Closest-point queries for the remesh distance field and the texture bake |
 | `nvdiffrast` | `mtldiffrast` (Metal), with pure-Python fallback | Differentiable rasterization for texture baking |
@@ -219,7 +223,7 @@ All hardcoded `.cuda()` calls are patched to use the active device.
 
 ### Technical details
 
-**Sparse 3D convolution** (`backends/conv_none.py`): submanifold sparse convolution via a spatial hash of active voxels — gather neighbor features per kernel position, apply weights by matmul, scatter-add back. Neighbor maps are cached per tensor.
+**Sparse 3D convolution**: the default backend is `flex_gemm` from [`mtlgemm`](https://github.com/pedronaugusto/mtlgemm) — Metal hashmap neighbor maps plus a masked implicit GEMM. `core.py` imports torch before probing it (its `_C` extension finds `libc10` through the already-loaded torch). If the import fails, one stderr line names the error and the run uses `backends/conv_none.py`: submanifold sparse convolution via a Python-dict spatial hash of active voxels — gather neighbor features per kernel position, apply weights by matmul, scatter-add back, with neighbor maps cached per tensor. `SPARSE_CONV_BACKEND=none` forces the fallback. Until 2026-11-06 every run here silently used that fallback. `core.py` imported `flex_gemm` before torch. `mtlgemm`'s `setup.py` bakes the build venv's absolute `torch/lib` path in as the only torch rpath, and `setup.sh` kept repacking a binary left in `deps/mtlgemm/build/` from before the project folder was renamed (setuptools skips the compile when that build is newer than its sources). `setup.sh` now deletes each Metal package's `build/` and forces a reinstall, so every run compiles against the current venv, then imports each package as a check.
 
 **Mesh extraction** (`backends/mesh_extract.py`): reimplements `flexible_dual_grid_to_mesh` without CUDA hashmaps — the coord→index lookup is a collision-free int64 coordinate hash resolved with `torch.unique` + `searchsorted`, then connected voxels per edge and quad triangulation by normal alignment.
 
@@ -238,6 +242,7 @@ This project ran a measurement-first optimization campaign on top of the base po
 | CFG batching | generation 197.3s → 181.9s (−7.8%) | The two classifier-free-guidance forwards run as one batch-2 forward; mesh is bit-identical. Opt out with `CFG_BATCH=0` |
 | Naive dense attention | structure phase ~1.75×, generation **−19%** (same-window A/B: 211.5s → ~170s) | PyTorch's fused SDPA is pathologically slow on MPS at the structure-phase shape (B=2, S=4096, H=12, D=128, bf16) — a textbook unfused `softmax(qkᵀ)v` measures 3.3–3.9× faster at both self- and cross-attention shapes, at bf16-level numerical noise. Opt out with `ATTN_BACKEND=sdpa` |
 | Naive sparse attention | shape/tex SLat sampling −38%/−44% s/it | Same finding, applied to the shape/tex SLat shapes (self-attn S=1591, cross-attn kv=1029) — naive measures ~4.0-4.1× faster than SDPA there, an even bigger win than dense. Opt out with `SPARSE_ATTN_BACKEND=sdpa` |
+| Metal sparse convolution (`flex_gemm`) | `512`: generation 136.6-136.9s → 96.2-101.8s (−26 to −30%), wall 179-181s → 140-148s; `1024_cascade`: generation 581.6s → 364.5s (−37%), wall 674s → 460s | The SLat decoders' submanifold convs ran on the pure-PyTorch `conv_none` fallback without notice: an import-order bug plus a stale build (details in [Technical details](#technical-details)). Sampling s/it is unchanged; only decode gets faster. On real decoder activations `flex_gemm` is ~3× closer to an fp32 reference than `conv_none` (relative error ≤2.2e-4 vs ≤6.4e-4; fp16 inputs). The gate mesh moves by +14 vertices / +34 triangles (+0.003%). Opt out with `SPARSE_CONV_BACKEND=none` |
 | Vectorized mesh extraction | extraction step 8.8s → 0.13s | The coord→index dict loops became an int64 perfect hash + `torch.unique`; bit-identical output |
 | Step-count fast mode | generation −39% at `--steps 8` | Quality/speed tradeoff, off by default (see [fast mode](#fast-mode)) |
 
@@ -256,7 +261,18 @@ Phase-level profiling (`tools/profile_memory.py`, one M-series/32GB machine, `51
 
 The peak occurs during **loading**, not during sampling or baking — checkpoint construction and dtype casting transiently need more memory than the pipeline settles into afterward. This also means process RSS (what actually determines whether a machine can run this at all) and PyTorch's MPS-only counters (`driver_allocated_memory`) disagree substantially: the MPS-only view puts the peak at ~9.4GB during texture baking, missing the larger, CPU-side loading spike entirely — because `low_vram` mode keeps not-yet-active submodels resident on the CPU side, and on unified memory that counts against the same budget even though it never touches the MPS device counters. If you're profiling this pipeline yourself, measure process RSS, not just MPS allocator stats.
 
-Practical implication: the ~12-14GB measured peak is comfortably under 24GB, and even a 16GB machine may have enough headroom depending on what else is running — this project hasn't been validated on 16GB hardware, but the earlier "peaks around 18GB" estimate look pessimistic in light of this measurement. `CFG_BATCH=0` (sequential CFG) measurably lowers memory *during sampling* (~5.8GB vs ~6.5GB driver-side) but doesn't change the global peak, since that's set during loading regardless of sampling settings.
+Practical implication: the whole-process peak memory footprint (table below) is ~18.5GB for the `512` pipeline and ~23.5GB for `1024_cascade`, so plan for a 24GB+ machine; this project has not been validated on 16GB hardware. `CFG_BATCH=0` (sequential CFG) measurably lowers memory *during sampling* (~5.8GB vs ~6.5GB driver-side) but doesn't change the global peak, since that's set during loading regardless of sampling settings.
+
+Whole-process figures from `/usr/bin/time -l` (M5/32GB, 2026-11-06) show about the same peak footprint for both sparse-conv backends (within ~1GB):
+
+| Run | Backend | Max RSS | Peak memory footprint |
+|---|---|---|---|
+| `512` (2 runs each) | `flex_gemm` | 10.9-11.8GB | 18.5GB |
+| `512` (2 runs each) | `none` | 11.4-11.8GB | 17.5-18.5GB |
+| `1024_cascade` (1 run each) | `flex_gemm` | 11.8GB | 23.5GB |
+| `1024_cascade` (1 run each) | `none` | 13.3GB | 23.0GB |
+
+Peak memory footprint (macOS `phys_footprint`, which also counts GPU-side allocations) is higher than RSS. Plan headroom with that number.
 
 The first-ever run also downloads ~15GB of HuggingFace weights (TRELLIS.2, DINOv3, RMBG-2.0), which is network-bound and not counted above.
 
