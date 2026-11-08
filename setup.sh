@@ -58,8 +58,9 @@ clone_dep_at() {
 
 # mtlbvh/mtlmesh are pinned: GLB export needs fixes that older commits lack.
 #   mtlbvh  fe6660b includes bc0a534 — the BVH traversal stack (24 slots)
-#           silently dropped subtrees on meshes above ~131K triangles, so
-#           closest-triangle queries missed the nearest triangle (holey remesh,
+#           can silently drop subtrees once a mesh exceeds ~131K triangles
+#           (derived safe bound; first measured failure at 1.18M), so
+#           closest-triangle queries can miss the nearest triangle (holey remesh,
 #           texels baked from the wrong surface).
 #   mtlmesh 5e67493 includes 16a7d0a — bounded hash probe loops and a fix for
 #           spurious weak-CAS insert failures.
@@ -174,7 +175,7 @@ if [ "${SKIP_METAL:-0}" != "1" ]; then
     # conv_none fallback) and flex_gemm.ops.grid_sample for the baker; without it
     # the baker uses this port's CPU sparse_grid_sample_3d (same result, slower).
     install_metal_dep mtlgemm     flex_gemm   || echo "  mtlgemm install failed — sparse conv falls back to pure PyTorch and the baker to the CPU sparse sampler (same result, slower)"
-    # Pedro Naugusto's o_voxel CPU fork — exposes o_voxel.postprocess.to_glb
+    # Pedro Augusto's o_voxel CPU fork — exposes o_voxel.postprocess.to_glb
     # which wraps the Metal stack. Install last so its deps already present.
     install_metal_dep trellis2-apple/o-voxel o_voxel \
         || echo "  o_voxel (Apple fork) install failed — falling back to KDTree baker"

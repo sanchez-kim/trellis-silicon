@@ -15,9 +15,10 @@ after decimation), always writes ``doubleSided=True``, and switches the
 material to ``BLEND`` when any texel has alpha < 250.
 
 `make_bvh` guards against an mtlbvh traversal bug in builds older than
-pedronaugusto/mtlbvh bc0a534: a 24-slot traversal stack silently drops
-subtrees on meshes with more than ~131K triangles, so ``unsigned_distance``
-returns a farther triangle than the nearest one. That corrupts the remesh
+pedronaugusto/mtlbvh bc0a534: a 24-slot traversal stack can silently drop
+subtrees once a mesh exceeds ~131K triangles (the derived bound below which it
+cannot overflow; first measured failure at 1.18M), so ``unsigned_distance``
+can return a farther triangle than the nearest one. That corrupts the remesh
 distance field (holes, fragments) and the texel snap (texels sample the wrong
 surface). A cheap self-test detects such a build; the BVH is then split into
 sub-BVHs small enough that the stack cannot overflow.

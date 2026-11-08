@@ -16,7 +16,7 @@ from .envflags import env_enabled
 
 # Set up backends before any TRELLIS imports. Use setdefault so the caller
 # can override from the environment. Default conv backend is flex_gemm since
-# Pedro Naugusto's mtlgemm fix (zero-copy on MPS, fp16/bf16 native); fall
+# Pedro Augusto's mtlgemm fix (zero-copy on MPS, fp16/bf16 native); fall
 # back to conv_none if flex_gemm isn't importable (see convbackend.py).
 # MPS fallback MUST be set before torch is imported anywhere (torch is
 # imported below, right after these defaults). Without this, segment_reduce and a few other
