@@ -70,6 +70,13 @@ select_sparse_conv_backend()
 sys.path.insert(0, _paths.trellis2_root())
 sys.path.append(_paths.stubs_dir())
 
+# Warn when `git pull` brought a newer patch but trellis-silicon-patch was not
+# re-run (issue #6). The patches package imports only stdlib and _paths, so
+# this import is cheap and does not need torch.
+from .patches.attention import warn_if_sparse_attention_patch_outdated
+
+warn_if_sparse_attention_patch_outdated(_paths.trellis2_root())
+
 import time
 import numpy as np
 from PIL import Image as PILImage
