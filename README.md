@@ -21,7 +21,7 @@ TRELLIS.2 is Microsoft Research's state-of-the-art image-to-3D model. It ships C
 ```bash
 git clone https://github.com/sanchez-kim/trellis-silicon.git && cd trellis-silicon
 xcodebuild -downloadComponent MetalToolchain  # recommended: builds the Metal sparse conv, mesh ops and baker
-hf auth login                                 # gated weights — approve DINOv3 + RMBG-2.0 on HF first
+hf auth login                                 # gated weights — approve DINOv3 on HF first
 bash setup.sh && source .venv/bin/activate
 trellis-silicon photo.png                     # → photo.glb (first run downloads ~15GB of weights)
 ```
@@ -36,7 +36,7 @@ This project builds on [trellis-mac](https://github.com/shivampkumar/trellis-mac
 
 From a single image, TRELLIS-Silicon generates a mesh with baked PBR textures (base color, metallic, roughness) as a ready-to-use GLB.
 
-**Input image** &rarr; **Generated GLB** with Metal-baked PBR textures. With the default `512` pipeline the decoder produces a ~513K-vertex, ~1.07M-triangle raw mesh; the exported GLB is remeshed and decimated to the 200K-face budget (~188K faces and ~94K vertices; UV seams split those into ~120K vertices in the file). `--obj` also writes the raw mesh.
+**Input image** &rarr; **Generated GLB** with Metal-baked PBR textures. With the default `512` pipeline the decoder produces a ~514K-vertex, ~1.09M-triangle raw mesh; the exported GLB is remeshed and decimated to the 200K-face budget (~187K faces and ~93K vertices; UV seams split those into ~122K vertices in the file). `--obj` also writes the raw mesh.
 
 <p>
 <img src="assets/brighella_input.png" width="200">
@@ -82,9 +82,8 @@ xcodebuild -downloadComponent MetalToolchain
 # Log into HuggingFace (needed for the gated model weights)
 hf auth login
 
-# Request access to these gated models (usually instant approval):
+# Request access to this gated model (usually instant approval):
 #   https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m
-#   https://huggingface.co/briaai/RMBG-2.0
 
 # Set up everything: create the venv, editable-install the package, clone &
 # patch TRELLIS.2, and build the Metal backends when the toolchain is present.
@@ -243,6 +242,8 @@ All hardcoded `.cuda()` calls are patched to use the active device.
 
 **Attention**: dense attention (structure phase) uses the `naive` backend that ships in the pinned TRELLIS.2. Sparse attention (shape/texture SLat phases) gets two backends from `patches/attention.py`: variable-length sequences are padded into a batch, run through an unfused `softmax(qkᵀ·scale)v` (`naive`, the default) or `torch.nn.functional.scaled_dot_product_attention` (`SPARSE_ATTN_BACKEND=sdpa`), then unpadded.
 
+**Background removal**: an RGB input goes through a background remover before conditioning; an RGBA input whose alpha is not all 255 skips it and uses its own alpha. The TRELLIS.2-4B `pipeline.json` names `briaai/RMBG-2.0` (CC BY-NC 4.0, gated). `patches/rembg.py` makes the remover class load the original BiRefNet instead (`ZhengPeng7/BiRefNet`, MIT, not gated; RMBG-2.0 uses the BiRefNet architecture), at a pinned revision (`e2bf8e4`, because its remote code runs with `trust_remote_code`) and in fp32 (its weights are stored fp16, and the fp32 input tensor fails against them). On five test photos (2026-11-14) the two masks, thresholded at 0.5, agreed at IoU 0.995-0.997. The mesh still changes: the gate input gives 514,312 vertices / 1,092,064 triangles with BiRefNet and 513,120 / 1,071,138 with RMBG-2.0. `REMBG_MODEL=briaai/RMBG-2.0` restores the RMBG-2.0 remover at its `main` revision.
+
 **GLB export** (`postprocess.py`): a port of the upstream TRELLIS.2 `to_glb` production path (`remesh=True`, as upstream `app.py` calls it), running on the Metal stack from [@pedronaugusto](https://github.com/pedronaugusto) — [`mtldiffrast`](https://github.com/pedronaugusto/mtldiffrast), [`mtlbvh`](https://github.com/pedronaugusto/mtlbvh), [`mtlmesh`](https://github.com/pedronaugusto/mtlmesh), plus helpers from his CPU fork of [`o_voxel`](https://github.com/pedronaugusto/trellis2-apple). The full-resolution decoder mesh is hole-filled, rebuilt by narrow-band dual contouring at the pipeline resolution, decimated to the face budget (`BAKE_MAX_FACES`, default 200K), UV-unwrapped, and textured by snapping every texel back to the full-resolution surface before sampling the voxel PBR volume. The material is `OPAQUE` and single-sided, as upstream. We do not call the fork's own `to_glb`: it adds a cleanup pass after the remesh that re-opens holes, and it switches the material to `BLEND` (see-through in three.js viewers) when any texel has alpha < 250. `mtlbvh` builds older than [bc0a534](https://github.com/pedronaugusto/mtlbvh/commit/bc0a534) can miss the nearest triangle once a mesh exceeds ~131K triangles (a 24-slot traversal stack can overflow; ~131K is the derived bound below which it cannot, and the first measured failure was at 1.18M triangles); `setup.sh` pins a fixed commit, and `postprocess.make_bvh` detects an old build with a self-test and falls back to exact sub-BVHs. `GLB_REMESH=0` restores the earlier path (`fast_simplification` to the face budget, then the fork's non-remesh branch), which leaves open boundaries in the GLB. That legacy path needs a fixed `mtlbvh` (pin `fe6660b`): the sub-BVH fallback only protects the default path. Texels sample the voxel PBR field with flex_gemm's sparse trilinear `grid_sample_3d`, as upstream; if it can't be imported, `postprocess.sparse_grid_sample_3d` gives the same result on CPU (the fork's own dense fallback counts empty voxels as black and bakes a darker texture). Without the Metal toolchain, `backends/texture_baker.py` takes over: xatlas UV unwrap, then a scipy cKDTree + inverse-distance weighting over the sparse voxel grid (no remesh).
 
 ## Performance
@@ -302,7 +303,7 @@ Four other `512` inputs (a fox figure, a tin robot, a backpack, an egg chair) me
 
 Memory is where this port is weakest. In a separate comparison on this Mac, [pixal3d.cpp](https://github.com/raven38/pixal3d.cpp), an independent GGML Metal port that runs third-party GGUF conversions of the same TRELLIS.2-4B checkpoint (tensor-level equivalence not checked), ran the same four inputs (same RGBA cutouts, seed 42, runs interleaved, 2026-11-07) with its own settings (`--res 512`, 150K-face target vs this port's 200K cap). Wall time was 2.9-4.5 min for pixal3d.cpp and 3.2-4.7 min for this port; peak memory footprint was 3.1-3.7GB vs 15.5-16.3GB. Read it as: about the same speed, roughly 4-5× the memory.
 
-The first-ever run also downloads ~15GB of HuggingFace weights (TRELLIS.2, DINOv3, RMBG-2.0), which is network-bound and not counted above.
+The first-ever run also downloads ~15GB of HuggingFace weights (TRELLIS.2, DINOv3, BiRefNet), which is network-bound and not counted above.
 
 > **Thermal note.** Apple Silicon throttles aggressively under sustained load. The *same* run can take several times longer when the machine has already been hot for a while — nothing in the code path changes. If a run is unexpectedly slow, let the machine cool for a few minutes and retry before blaming the code. The 2026-11-06 timings in this README come from fresh processes on a machine that idled for at least 150 s between runs (warm model cache, not thermally throttled). A VM process kept one CPU core at 100% during all runs.
 
@@ -312,7 +313,7 @@ The first-ever run also downloads ~15GB of HuggingFace weights (TRELLIS.2, DINOv
 - **GLB face budget.** The GLB is decimated to 200K faces by default (upstream's GitHub app defaults to 500K). Raise it with `BAKE_MAX_FACES` (see [Maximum quality](#maximum-quality)) or pass `--obj` for the full-resolution decoder mesh.
 - **Without the Metal toolchain** (or with `SKIP_METAL=1`), all four Metal packages are missing: sparse convolution runs on the pure-PyTorch fallback (slower decode), the decode-time hole fill is off, and the KDTree fallback baker skips the upstream remesh, so its GLBs keep the decoder mesh's open boundaries. The output mesh also differs from the verification gate.
 - **Texture colour.** TRELLIS.2 bakes an albedo that is often darker, and sometimes more saturated, than the input photo. On four test inputs (seed 42) the unlit input-view mean value (HSV V) dropped by 0.06-0.14 on three; the fourth came out slightly brighter (+0.04). This is not a colour-space bug in the port: the training data stores sRGB texture bytes as `base_color` (with a known exception: some factor-only materials store linear factors as sRGB bytes, which also pulls toward dark), the decoder output and `to_glb` keep that encoding, and treating the texture as linear overshoots on every input (V +0.08 to +0.23). An independent GGML port of the same checkpoint also comes out darker than the photo on two of the four inputs. The model predicts a de-lit material (highlights and lighting removed), and its training conditioning renders use Blender 3.0's default Filmic view with up to 1.5x lighting, which likely pulls a photo toward a darker albedo. `--color-match` (or `TEXTURE_COLOR_MATCH=1`) applies an optional correction after the bake: a linear-light gain from the median luminance (brighten-only, at most 2x) and a Lab chroma scale (0.75-1.25x), both measured over the texels that map to the surface, weighted by surface area, against the input's foreground. It can't see which side of the object the photo shows, and the photo's shadows and highlights are part of its statistics, so it stays off by default. On the four inputs (measured on the earlier `none` sparse-conv path; not re-run on `flex_gemm`, where the uncorrected value is also 0.19) it cut the mean |ΔV|+|ΔS| from 0.19 to 0.07 and left the already-close input as is.
-- **Switches.** `DECODE_FILL_HOLES=0` skips the decode-time hole fill. `GLB_REMESH=0` selects the legacy GLB path. Both accept `0`, `false`, `no` or `off` (case-insensitive) as off. `TEXTURE_COLOR_MATCH=1` turns the optional colour match on.
+- **Switches.** `DECODE_FILL_HOLES=0` skips the decode-time hole fill. `GLB_REMESH=0` selects the legacy GLB path. Both accept `0`, `false`, `no` or `off` (case-insensitive) as off. `TEXTURE_COLOR_MATCH=1` turns the optional colour match on. `REMBG_MODEL=briaai/RMBG-2.0` selects the RMBG-2.0 background remover instead of BiRefNet (see [Technical details](#technical-details); it needs approved access on HuggingFace, and commercial use needs a license from BRIA).
 - **Inference only.** No training support.
 
 ## Development
@@ -336,7 +337,8 @@ The code in this repository (backends, patches, package, scripts) is released un
 
 - **TRELLIS.2** — [MIT License](https://github.com/microsoft/TRELLIS.2/blob/main/LICENSE)
 - **DINOv3** — [Meta custom license](https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m/blob/main/LICENSE.md) (gated; review before commercial use)
-- **RMBG-2.0** — [CC BY-NC 4.0](https://huggingface.co/briaai/RMBG-2.0) (non-commercial; commercial use requires a license from BRIA)
+- **BiRefNet** (`ZhengPeng7/BiRefNet`, the default background remover) — [MIT License](https://huggingface.co/ZhengPeng7/BiRefNet)
+- **RMBG-2.0** — [CC BY-NC 4.0](https://huggingface.co/briaai/RMBG-2.0) (non-commercial; commercial use requires a license from BRIA). Downloaded only when you opt in with `REMBG_MODEL=briaai/RMBG-2.0`
 
 ## References
 
@@ -344,4 +346,5 @@ The code in this repository (backends, patches, package, scripts) is released un
 - [TRELLIS.2](https://github.com/microsoft/TRELLIS.2) by Microsoft Research — the original model and codebase
 - [@pedronaugusto](https://github.com/pedronaugusto)'s Metal stack — [`mtldiffrast`](https://github.com/pedronaugusto/mtldiffrast), [`mtlbvh`](https://github.com/pedronaugusto/mtlbvh), [`mtlmesh`](https://github.com/pedronaugusto/mtlmesh), [`mtlgemm`](https://github.com/pedronaugusto/mtlgemm), and the [`trellis2-apple`](https://github.com/pedronaugusto/trellis2-apple) CPU fork of `o_voxel` — the Metal texture-baking and sparse-conv path
 - [DINOv3](https://github.com/facebookresearch/dinov3) by Meta — image feature extraction
-- [RMBG-2.0](https://github.com/Bria-AI/RMBG-2.0) by BRIA AI — background removal
+- [BiRefNet](https://github.com/ZhengPeng7/BiRefNet) by Peng Zheng et al. — background removal (default)
+- [RMBG-2.0](https://github.com/Bria-AI/RMBG-2.0) by BRIA AI — background removal (opt-in; TRELLIS.2's own default)

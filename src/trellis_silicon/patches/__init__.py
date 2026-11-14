@@ -29,6 +29,7 @@ from .loading import (
     patch_skip_init_on_load,
 )
 from .mesh import patch_fdg_vae, patch_mesh_base, patch_mesh_fill_holes
+from .rembg import patch_rembg_model
 from .stubs import install_conv_backend, install_mesh_extract
 
 __all__ = ["main"]
@@ -48,6 +49,7 @@ def main():
     patch_sparse_attention()
     patch_image_feature_extractor()
     patch_birefnet()
+    patch_rembg_model()
     patch_mesh_base()
     patch_mesh_fill_holes()
     patch_fdg_vae()

@@ -33,18 +33,25 @@ Any change that can affect generation must reproduce the deterministic
 baseline:
 
 - **seed 42 + `assets/brighella_input.png` + `512` pipeline → exactly
-  513,120 vertices / 1,071,138 triangles** (the `Mesh:` line, after the
+  514,312 vertices / 1,092,064 triangles** (the `Mesh:` line, after the
   decode-time hole fill and before the GLB export). The GLB face count is not
   part of the gate: the Metal QEM decimation varies by a few hundred faces
   between runs.
 
+The gate input is RGB, so it goes through the background remover; the run log
+prints the model on a `[REMBG] Background remover:` line. The baseline above
+uses the default BiRefNet (2026-11-14). With `REMBG_MODEL=briaai/RMBG-2.0` the
+same run reproduces the earlier baseline, 513,120 vertices / 1,071,138
+triangles.
+
 The gate assumes the Metal toolchain is installed, sparse convolution runs on
 `flex_gemm` (the run log prints `[SPARSE] Conv backend: flex_gemm`; if
 `core.py` prints a "flex_gemm unavailable" line, re-run `setup.sh`), and
-decode-time hole fill is on (the default). With `SPARSE_CONV_BACKEND=none`
-the same run reproduces the previous baseline, 513,106 vertices / 1,071,104
-triangles; with `SPARSE_CONV_BACKEND=none DECODE_FILL_HOLES=0 GLB_REMESH=0`
-it reproduces 512,254 vertices / 1,065,930 triangles.
+decode-time hole fill is on (the default). With RMBG-2.0 as the remover,
+`SPARSE_CONV_BACKEND=none` gave 513,106 vertices / 1,071,104 triangles, and
+`SPARSE_CONV_BACKEND=none DECODE_FILL_HOLES=0 GLB_REMESH=0` gave 512,254
+vertices / 1,065,930 triangles; these two have not been re-measured with
+BiRefNet.
 
 Changes that only reorder floating-point ops (batching, kernel swaps) instead
 need to stay within ±1% of that baseline, with the GLB loading successfully
