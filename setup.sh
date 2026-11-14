@@ -210,9 +210,8 @@ else
     echo "Some model weights require authentication. Run:"
     echo "  hf auth login"
     echo ""
-    echo "You also need to request access to these gated models:"
+    echo "You also need to request access to this gated model:"
     echo "  https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m"
-    echo "  https://huggingface.co/briaai/RMBG-2.0"
 fi
 
 if [ -n "$METAL_FAILS" ]; then
