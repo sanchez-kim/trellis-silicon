@@ -70,7 +70,13 @@ clone_dep_at https://github.com/pedronaugusto/mtlbvh.git    mtlbvh  "$MTLBVH_COM
 clone_dep https://github.com/pedronaugusto/mtldiffrast.git   mtldiffrast
 clone_dep_at https://github.com/pedronaugusto/mtlmesh.git   mtlmesh "$MTLMESH_COMMIT"
 clone_dep https://github.com/pedronaugusto/mtlgemm.git       mtlgemm
-clone_dep https://github.com/pedronaugusto/trellis2-apple.git trellis2-apple
+# trellis2-apple is pinned: from 29cf47b on, o-voxel/setup.py also builds a
+#   CPU extension that needs the o-voxel/third_party/eigen submodule, which
+#   this clone does not fetch, so o_voxel fails to build ('Eigen/Dense' file
+#   not found) and the baker falls back to KDTree. 6055b86 is the commit the
+#   verification gate was measured with.
+TRELLIS2_APPLE_COMMIT="${TRELLIS2_APPLE_COMMIT:-6055b868734af6e12769d229d90580e775fae9f0}"
+clone_dep_at https://github.com/pedronaugusto/trellis2-apple.git trellis2-apple "$TRELLIS2_APPLE_COMMIT"
 
 # TRELLIS.2 lives at the project root (the patcher and package expect it there).
 # Pinned to the commit the patches and the verification gate were validated
@@ -207,8 +213,8 @@ if python3 -c "from huggingface_hub import get_token; assert get_token()" 2>/dev
     echo "HuggingFace auth: OK"
 else
     echo "WARNING: Not logged into HuggingFace."
-    echo "Some model weights require authentication. Run:"
-    echo "  hf auth login"
+    echo "Some model weights require authentication. Run (hf is installed in .venv):"
+    echo "  source .venv/bin/activate && hf auth login"
     echo ""
     echo "You also need to request access to this gated model:"
     echo "  https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m"
@@ -218,6 +224,8 @@ if [ -n "$METAL_FAILS" ]; then
     echo
     echo "WARNING: Metal packages not available:"
     printf '%s\n' "$METAL_FAILS" | sed 's/^/  /'
+    echo "Generation still runs, on slower or lower-quality fallbacks (see the"
+    echo "README's Limitations). Set STRICT_METAL=1 to make this an error."
     if [ "${STRICT_METAL:-0}" = "1" ]; then
         echo "STRICT_METAL=1: failing."
         exit 1
