@@ -30,6 +30,7 @@ dependencies = [
     "easydict",
     "kornia",
     "timm",
+    "einops",  # imported by the BiRefNet remover's remote code (with kornia, timm)
     "imageio",
     "opencv-python-headless",
     "xatlas",
