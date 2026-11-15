@@ -21,9 +21,9 @@ TRELLIS.2 is Microsoft Research's state-of-the-art image-to-3D model. It ships C
 ```bash
 git clone https://github.com/sanchez-kim/trellis-silicon.git && cd trellis-silicon
 xcodebuild -downloadComponent MetalToolchain  # recommended: builds the Metal sparse conv, mesh ops and baker
-hf auth login                                 # gated weights — approve DINOv3 on HF first
 bash setup.sh && source .venv/bin/activate
-trellis-silicon photo.png                     # → photo.glb (first run downloads ~15GB of weights)
+hf auth login                                 # gated weights — approve DINOv3 on HF first
+trellis-silicon photo.png                     # → output_3d.glb (first run downloads ~15GB of weights)
 ```
 
 Requires macOS on Apple Silicon (M1+), Python 3.11+, and at least 24GB of unified memory (32GB recommended for the `1024` pipelines, which peaked at 20.9-23.5GB on the sample image). Details, gated-model links, and troubleshooting in [Installation](#installation).
@@ -79,17 +79,18 @@ cd trellis-silicon
 # keeps open boundaries), and texture baking uses a pure-Python KDTree baker.
 xcodebuild -downloadComponent MetalToolchain
 
-# Log into HuggingFace (needed for the gated model weights)
-hf auth login
-
-# Request access to this gated model (usually instant approval):
-#   https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m
-
 # Set up everything: create the venv, editable-install the package, clone &
 # patch TRELLIS.2, and build the Metal backends when the toolchain is present.
 bash setup.sh
 
 source .venv/bin/activate
+
+# Log into HuggingFace (needed for the gated model weights). The `hf` command
+# comes from huggingface_hub, which setup.sh installs into .venv.
+hf auth login
+
+# Request access to this gated model (usually instant approval):
+#   https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m
 ```
 
 `setup.sh` does an editable install (`uv pip install -e .`), which registers the `trellis-silicon`, `trellis-silicon-web`, and `trellis-silicon-patch` commands.
@@ -108,7 +109,7 @@ rm -rf deps && bash setup.sh
 
 Each `setup.sh` run recompiles the Metal packages from a clean `build/` directory (about 85 s on an M5), then prints an `OK` / `NOT available` line for each one. If a run prints `[trellis-silicon] flex_gemm unavailable (...)`, sparse convolution is on the slow pure-PyTorch fallback: re-run `bash setup.sh`.
 
-**Upgrading.** `mtlbvh` and `mtlmesh` are pinned to exact commits. If an existing `deps/mtlbvh` or `deps/mtlmesh` is at a different commit, `setup.sh` stops with an error. Rebuild them with the same command:
+**Upgrading.** `mtlbvh`, `mtlmesh` and `trellis2-apple` are pinned to exact commits. If an existing `deps/mtlbvh`, `deps/mtlmesh` or `deps/trellis2-apple` is at a different commit, `setup.sh` stops with an error. Rebuild them with the same command:
 
 ```bash
 rm -rf deps && bash setup.sh
