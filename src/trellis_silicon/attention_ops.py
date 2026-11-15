@@ -30,17 +30,17 @@ _chunk_notice_shown = False
 def naive_attention(q, k, v, max_out_elems=CHUNK_ELEMS):
     """q,k,v: [B, H, S, D]. softmax(q @ k^T * D**-0.5) @ v.
 
-    Splits along the query axis so no score matmul output exceeds
-    ``max_out_elems`` (issue #6; see module docstring). Softmax is per query
-    row, so chunking is exact. At or below the limit this runs the single-shot
-    expression unchanged (bit-identical to the unchunked code).
+    k and v must have the same B and H as q (no broadcasting); v's last dim
+    may differ from D. Splits along the query axis so no score matmul output
+    exceeds ``max_out_elems`` (issue #6; see module docstring). Softmax is per
+    query row, so chunking is exact. At or below the limit this runs the
+    single-shot expression unchanged (bit-identical to the unchunked code).
     """
     scale = q.shape[-1] ** -0.5
-    kt = k.transpose(-2, -1)
     B, H, S_q = q.shape[:3]
     S_kv = k.shape[-2]
     if B * H * S_q * S_kv <= max_out_elems:
-        return torch.softmax((q @ kt) * scale, dim=-1) @ v
+        return torch.softmax((q @ k.transpose(-2, -1)) * scale, dim=-1) @ v
 
     rows = max(1, max_out_elems // (B * H * S_kv))
     global _chunk_notice_shown
@@ -53,10 +53,19 @@ def naive_attention(q, k, v, max_out_elems=CHUNK_ELEMS):
             file=sys.stderr,
             flush=True,
         )
-    out = q.new_empty(B, H, S_q, v.shape[-1])
+    # Flatten batch and heads once. With 4D operands, matmul copies k^T and v
+    # into a 3D layout on every chunk; the call site passes permuted
+    # (non-contiguous) tensors, so each chunk would copy all of k and v.
+    # Cost: one copy each of q, k and v lives until return (for the 15,626-
+    # token fox at 1024, 96 MB each in bf16, against ~1 GB of per-chunk scores).
+    BH, D_v = B * H, v.shape[-1]
+    q3 = q.reshape(BH, S_q, q.shape[-1])
+    kt3 = k.reshape(BH, S_kv, k.shape[-1]).transpose(1, 2)
+    v3 = v.reshape(BH, S_kv, D_v)
+    out = q.new_empty(BH, S_q, D_v)
     for i in range(0, S_q, rows):
-        scores = q[:, :, i : i + rows] @ kt
+        scores = q3[:, i : i + rows] @ kt3
         scores.mul_(scale)  # in place: one score-sized tensor fewer per chunk
-        out[:, :, i : i + rows] = torch.softmax(scores, dim=-1) @ v
+        out[:, i : i + rows] = torch.softmax(scores, dim=-1) @ v3
         del scores
-    return out
+    return out.view(B, H, S_q, D_v)

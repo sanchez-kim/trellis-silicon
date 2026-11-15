@@ -58,6 +58,19 @@ def test_chunked_matches_reference_noncontiguous_call_site_layout():
     assert torch.allclose(out, _ref(q, k, v), atol=1e-6, rtol=1e-5)
 
 
+@pytest.mark.parametrize("B,H", [(1, 1), (2, 3)])
+def test_chunked_value_dim_differs_from_qk_dim(B, H):
+    # The call site allows C_v != C_q; the output and v reshape must use D_v.
+    g = torch.Generator().manual_seed(2)
+    S_q, S_kv, D, D_v = 9, 5, 8, 16
+    q = torch.randn(B, S_q, H, D, generator=g).permute(0, 2, 1, 3)
+    k = torch.randn(B, S_kv, H, D, generator=g).permute(0, 2, 1, 3)
+    v = torch.randn(B, S_kv, H, D_v, generator=g).permute(0, 2, 1, 3)
+    out = naive_attention(q, k, v, max_out_elems=B * H * S_kv * 2)
+    assert out.shape == (B, H, S_q, D_v)
+    assert torch.allclose(out, _ref(q, k, v), atol=1e-6, rtol=1e-5)
+
+
 def test_rows_floor_at_one_when_max_out_tiny():
     q, k, v = _qkv(S_q=6, S_kv=7)
     out = naive_attention(q, k, v, max_out_elems=1)
@@ -153,7 +166,10 @@ def test_warn_helper_prints_one_line_only_when_outdated(tmp_path):
     )
 
     missing = io.StringIO()
-    assert attn_patch.warn_if_sparse_attention_patch_outdated(str(tmp_path / "nope"), file=missing) is False
+    assert (
+        attn_patch.warn_if_sparse_attention_patch_outdated(str(tmp_path / "nope"), file=missing)
+        is False
+    )
     assert missing.getvalue() == ""
 
 
@@ -189,7 +205,8 @@ def test_patch_refuses_unrecognised_elif_block(tmp_path, monkeypatch, capsys):
     text = (
         "def f():\n    if x:\n        pass\n"
         "    elif config.ATTN in ('sdpa', 'naive'):\n        hand_edited()\n"
-        + attn_patch._RAISE_ANCHOR + "\n"
+        + attn_patch._RAISE_ANCHOR
+        + "\n"
     )
     path = _patch_text(tmp_path, monkeypatch, text)
     assert path.read_text() == text
