@@ -12,8 +12,8 @@ import os
 import sys
 import time
 
-from . import core
 from .core import WatchdogEmptyMeshError, generate_glb, load_pipeline
+from .image_input import open_image
 
 
 def main():
@@ -87,7 +87,7 @@ def main():
     print(f"Device: MPS (low_vram={pipeline.low_vram})")
 
     # Load image
-    img = core.PILImage.open(args.image)
+    img = open_image(args.image)
     print(f"Input: {args.image} ({img.size[0]}x{img.size[1]})")
 
     # Generate
