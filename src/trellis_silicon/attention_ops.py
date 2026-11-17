@@ -24,7 +24,9 @@ import torch
 MPS_BMM_MAX_OUT = 2**32
 # Score elements per chunk: 512 MB per bf16 score tensor. Must stay <= MPS_BMM_MAX_OUT.
 CHUNK_ELEMS = 2**28
-_chunk_notice_shown = False
+# Shapes already reported. One line per new shape, so a cascade run shows both
+# shape-SLat stages; the repeated calls within a stage stay silent.
+_chunk_notice_shapes = set()
 
 
 def naive_attention(q, k, v, max_out_elems=CHUNK_ELEMS):
@@ -43,9 +45,9 @@ def naive_attention(q, k, v, max_out_elems=CHUNK_ELEMS):
         return torch.softmax((q @ k.transpose(-2, -1)) * scale, dim=-1) @ v
 
     rows = max(1, max_out_elems // (B * H * S_kv))
-    global _chunk_notice_shown
-    if not _chunk_notice_shown:
-        _chunk_notice_shown = True
+    shape = (B, H, S_q, S_kv)
+    if shape not in _chunk_notice_shapes:
+        _chunk_notice_shapes.add(shape)
         print(
             f"[SPARSE] naive attention B={B} H={H} S_q={S_q} S_kv={S_kv}: "
             f"{B * H * S_q * S_kv:,} score elements > {max_out_elems:,}; "

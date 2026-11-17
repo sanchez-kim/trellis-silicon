@@ -109,7 +109,9 @@ rm -rf deps && bash setup.sh
 
 Each `setup.sh` run recompiles the Metal packages from a clean `build/` directory (about 85 s on an M5), then prints an `OK` / `NOT available` line for each one. If a run prints `[trellis-silicon] flex_gemm unavailable (...)`, sparse convolution is on the slow pure-PyTorch fallback: re-run `bash setup.sh`.
 
-**Upgrading.** `mtlbvh`, `mtlmesh` and `trellis2-apple` are pinned to exact commits. If an existing `deps/mtlbvh`, `deps/mtlmesh` or `deps/trellis2-apple` is at a different commit, `setup.sh` stops with an error. Rebuild them with the same command:
+**Upgrading.** After `git pull`, re-run `bash setup.sh`. It keeps your `.venv`, installs any new Python dependencies (for example `einops`, which the BiRefNet remover needs), and re-applies the TRELLIS.2 patches. If you skip it, a run can stop on a missing module, or print `[SPARSE] WARNING: ... out of date`.
+
+`mtlbvh`, `mtlmesh` and `trellis2-apple` are pinned to exact commits. If an existing `deps/mtlbvh`, `deps/mtlmesh` or `deps/trellis2-apple` is at a different commit, `setup.sh` stops with an error. Rebuild them with the same command:
 
 ```bash
 rm -rf deps && bash setup.sh
