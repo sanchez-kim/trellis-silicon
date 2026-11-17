@@ -71,6 +71,15 @@ def test_chunked_value_dim_differs_from_qk_dim(B, H):
     assert torch.allclose(out, _ref(q, k, v), atol=1e-6, rtol=1e-5)
 
 
+def test_notice_once_per_new_shape(monkeypatch, capsys):
+    monkeypatch.setattr(attention_ops, "_chunk_notice_shapes", set())
+    small, big = _qkv(S_q=6, S_kv=6), _qkv(S_q=9, S_kv=9)
+    for q, k, v in (small, small, big, big, small):
+        naive_attention(q, k, v, max_out_elems=1)
+    lines = capsys.readouterr().err.splitlines()
+    assert [ln.split()[5] for ln in lines] == ["S_q=6", "S_q=9"]
+
+
 def test_rows_floor_at_one_when_max_out_tiny():
     q, k, v = _qkv(S_q=6, S_kv=7)
     out = naive_attention(q, k, v, max_out_elems=1)
